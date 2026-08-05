@@ -1,0 +1,135 @@
+# Cairn v2 Dispatcher config example.
+# Full schema: docs/dispatch-config-spec.md.  Placeholders only — real values via ${ENV_VAR}.
+server:
+  url: "http://cairn-server:8000"
+  api_token: "${CAIRN_API_TOKEN}"       # same Bearer token as the server; never injected into agent containers (C5)
+
+# Shared environment variables merged into every worker. LLM credentials live per-worker below.
+common_env:
+  HTTPS_PROXY: "http://127.0.0.1:7897"  # optional outbound proxy / egress
+  NO_PROXY: "cairn-server,api.anthropic.com,api.deepseek.com"
+
+runtime:
+  execution: "container"                # container (default) | local (host processes, authorized env only)
+  # Scheduler tick interval in seconds.
+  interval: 3
+  # Global concurrency cap across all workers and all engagements.
+  max_workers: 8
+  # Maximum number of engagements that may be actively scheduled at the same time.
+  max_running_projects: 3
+  # Per-engagement worker cap. Prevents one engagement from monopolizing the whole dispatcher.
+  max_project_workers: 4
+  # Timeout for each enabled worker healthcheck.
+  healthcheck_timeout: 20
+  # "startup_and_task" checks at dispatcher startup and before every task.
+  # "startup_only" checks only at startup. "disabled" skips automatic worker checks.
+  worker_healthcheck: "startup_only"
+  # Prompt set loaded from cairn/src/cairn/dispatcher/prompts/.
+  prompt_group: "default"
+
+tasks:
+  bootstrap:
+    # Main execution timeout for the initial attack-surface sweep + coverage seeding.
+    timeout: 300
+    # Time budget for conclude fallback after the main phase times out or returns unusable output.
+    conclude_timeout: 90
+  reason:
+    # Coverage accountant: reads gaps, proposes next intents / recommends finalize.
+    timeout: 300
+    # Hard cap on how many new intents one reason step may create.
+    max_intents: 2
+  explore:
+    # Coverage-item-driven exploration: outputs facts + findings + coverage_result.
+    timeout: 300
+    conclude_timeout: 90
+  verify:
+    # Independent two-stage blind review (blind → comparison) of one finding.
+    timeout: 300
+  audit:
+    # Independent re-test of sampled high-priority coverage cells (F3).
+    timeout: 300
+  replay:
+    # Deterministic replay engine (F4): no LLM, worker='replay-engine'.
+    timeout: 60
+
+security:
+  api_token_env: "CAIRN_API_TOKEN"          # unique Bearer token env name
+  capture_token_env: "CAIRN_CAPTURE_TOKEN"  # proxy's restricted write token (traffic index only, F8)
+  capture_ca_dir: "/var/cairn/capture-ca"   # per-engagement CA private keys (Dispatcher holds)
+  evidence_root: "/var/cairn/evidence"      # evidence files (mounted into worker, B7)
+  traffic_root: "/var/cairn/traffic"        # full traffic captures (F2/C4)
+  archive_root: "/var/cairn/archive"        # archive root (C4: zstd + encryption)
+  static_encryption: true                   # evidence/traffic at-rest (LUKS/encfs or 0700, C13)
+  archive_encryption: true                  # archive mandatory encryption (C4/C13)
+  executor_url: ""                          # optional executor sidecar (P1: sole docker.sock holder)
+
+scope:
+  enforce_scope_guard: true                 # prohibited target → 403 SCOPE_DENIED, no fallback
+  enforce_auth_window: true                 # reject dispatch outside window; auto-pause on expiry
+  enforce_kill_switch: true                 # global + engagement kill switch → 423
+  default_scope_policy: "{}"                # applied when engagement is created without one
+
+tuning:
+  writeback_retries: 1                      # coverage/finding writeback retries before giving up
+  reconcile_intent_timeout_multiplier: 2    # intent stale if >2×interval without heartbeat
+  min_capture_ratio: 2.0                    # capture_gap: declared ≥ captured×this
+  min_capture_abs_diff: 3                   # capture_gap: and diff ≥ this
+  event_summary_max_bytes: 512              # task_events.message cap
+  command_evidence_max_bytes: 1048576       # command stdout/stderr cap (else file reference)
+  event_raw_retain_days: 7                  # raw event stream retain window
+  sse_heartbeat_seconds: 15                 # SSE heartbeat interval
+  longpoll_hold_seconds: 20                 # long-poll hold upper bound
+  worker_rejected_cooldown_seconds: 5
+  worker_unhealthy_cooldown_seconds: 5
+
+container:
+  # Base worker container. The dispatcher execs agent commands inside one container per engagement.
+  image: "ghcr.io/oritera/cairn-worker-container:latest"
+  # Capture mode MUST use bridge (per-worker IP for C12 attribution); host only for local/drill
+  # and must be marked "no network fallback".
+  network_mode: "bridge"
+  # "stop" keeps finished containers for inspection; "remove" is cleaner but loses post-run state.
+  completed_action: "stop"
+  # Add Linux capabilities only when a task truly needs them, such as packet crafting or network admin actions.
+  # Runtime grant is per-engagement via scope_policy.network_cap; this is only the baseline.
+  # cap_add:
+  #   - "NET_RAW"
+  #   - "NET_ADMIN"
+
+workers:
+  # Worker priority is ascending: lower numbers are preferred first.
+  # max_running is per-worker concurrency. Slower backends such as Pi usually benefit from lower values.
+  - name: "claudecode_deepseek-v4-pro"
+    type: "claudecode"
+    task_types: [bootstrap, reason, explore, verify, audit]
+    max_running: 2
+    priority: 0
+    verify_eligible: true         # eligible for independent verify (creator-exclusion enforced at dispatch)
+    env:
+      ANTHROPIC_MODEL: "deepseek-v4-pro"
+      ANTHROPIC_BASE_URL: "https://api.deepseek.com/anthropic"
+      ANTHROPIC_AUTH_TOKEN: "sk-xxx"
+
+  # - name: "codex_qwen3.6-plus"
+  #   type: "codex"
+  #   task_types: [bootstrap, reason, explore, verify, audit]
+  #   max_running: 2
+  #   priority: 0
+  #   verify_eligible: true
+  #   env:
+  #     CODEX_MODEL: "qwen3.6-plus"
+  #     CODEX_BASE_URL: "https://dashscope.aliyuncs.com/compatible-mode/v1"
+  #     OPENAI_API_KEY: "sk-xxx"
+
+  # - name: "pi_qwen3.6-plus"
+  #   type: "pi"
+  #   task_types: [bootstrap, reason, explore]
+  #   max_running: 2
+  #   priority: 0
+  #   verify_eligible: false      # e.g. excluded from verify
+  #   env:
+  #     PI_MODEL: "qwen3.6-plus"
+  #     PI_BASE_URL: "https://dashscope.aliyuncs.com/compatible-mode/v1"
+  #     PI_API_KEY: "sk-xxx"
+  #     PI_PROVIDER_API: "openai-completions"
+  #     PI_MODEL_CONTEXT_WINDOW: "262144"
