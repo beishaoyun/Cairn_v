@@ -27,6 +27,7 @@
 from __future__ import annotations
 
 import json
+import os
 import threading
 import time
 from datetime import datetime, timezone
@@ -72,11 +73,50 @@ def _now_iso() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
-def _default_backend(config: DispatcherConfig) -> ExecutionBackend:
-    """按 runtime.execution 构造后端（测试注入覆盖）。"""
+def _make_scope_resolver(
+    client: CairnClient,
+    project_to_eid: dict[str, str],
+) -> Callable[[str], Any]:
+    """构造 ``scope_resolver(project_id) -> ContainerScope``（缺口 1 接线）。
+
+    resolver 把 ``project_id`` 经 ``project_to_eid`` 反查所属 engagement，再经
+    ``CairnClient.get_engagement_scope`` 拉取 ``scope_policy``（DDL §2.1），解析为
+    容器后端可消费的 ``ContainerScope``（capture 代理注入 + CA 信任 + 网络能力 +
+    资源限制）。查不到 → 返回空 ``ContainerScope()``（安全降级，容器用默认参数）。
+    """
+    from ..runtime.containers import ContainerScope, resolve_scope_policy
+
+    def _resolver(project_id: str) -> ContainerScope:
+        eid = project_to_eid.get(str(project_id))
+        if not eid:
+            return ContainerScope()
+        try:
+            scope_policy = client.get_engagement_scope(eid)
+        except CairnClientError:
+            return ContainerScope()
+        return resolve_scope_policy(eid, scope_policy)
+
+    return _resolver
+
+
+def _default_backend(
+    config: DispatcherConfig,
+    *,
+    client: Optional[CairnClient] = None,
+    project_to_eid: Optional[dict[str, str]] = None,
+) -> ExecutionBackend:
+    """按 runtime.execution 构造后端（测试注入覆盖）。
+
+    container 模式且给了 ``client``+``project_to_eid`` → 挂上 ``scope_resolver``
+    （真实抓包接线：capture 时注入 HTTPS_PROXY/CA 信任 + 挂载专属 CA）。
+    """
     if config.runtime.execution == "container":
         from ..runtime.containers import ContainerBackend
 
+        if client is not None and project_to_eid is not None:
+            return ContainerBackend(
+                config, scope_resolver=_make_scope_resolver(client, project_to_eid)
+            )
         return ContainerBackend(config)
     return LocalBackend(config)
 
@@ -91,12 +131,17 @@ def run_dispatch_loop(
     """CLI 入口（Agent 13 懒导入）：装配依赖并运行主循环。"""
     config: DispatcherConfig = ctx.config
     client = client or CairnClient(config.server.url, config.server.api_token)
-    backend = backend or _default_backend(config)
+    # ``project_to_eid`` 由 loop 在派发/建 project 时填充；_default_backend 用它构造
+    # container 后端的 scope_resolver（缺口 1），loop 再经同一 dict 读 project→eid。
+    project_to_eid: dict[str, str] = {}
+    if backend is None:
+        backend = _default_backend(config, client=client, project_to_eid=project_to_eid)
     loop = DispatcherLoop(
         ctx,
         client=client,
         backend=backend,
         interval=interval if interval is not None else float(config.runtime.interval),
+        project_to_eid=project_to_eid,
     )
     try:
         return loop.run()
@@ -127,6 +172,8 @@ class DispatcherLoop:
         backend: ExecutionBackend,
         interval: float = 3.0,
         escalation: Optional[ReasonEscalation] = None,
+        project_to_eid: Optional[dict[str, str]] = None,
+        capture_manager: Optional[Any] = None,
     ) -> None:
         self.ctx = ctx
         self.config: DispatcherConfig = ctx.config
@@ -144,8 +191,20 @@ class DispatcherLoop:
         self._escalation: ReasonEscalation = escalation or ReasonEscalation()
         self._pending_intents: dict[str, list[dict]] = {}
         self._project_id: dict[str, str] = {}
+        #: project_id → engagement_id 反向映射（container scope_resolver 用；派发/建 project 时填充）
+        self._project_to_eid: dict[str, str] = project_to_eid if project_to_eid is not None else {}
         self._runtime_projects: set[str] = set()
         self._reason_blocked_until: dict[str, float] = {}
+
+        # ---- 真实抓包：Dispatcher 侧捕获代理编排（缺口 2 接线）----
+        if capture_manager is not None:
+            self._capture_manager = capture_manager
+        else:
+            from ..capture.proxy import CaptureProxyManager
+
+            self._capture_manager = CaptureProxyManager(
+                ca_dir=self.config.security.capture_ca_dir
+            )
 
         # ---- 并发账本 ----
         self._running: dict[str, dict] = {}  # run_id -> rec
@@ -174,6 +233,12 @@ class DispatcherLoop:
         finally:
             self._stop_kill_monitor()
             self._heartbeat.stop()
+            # C3：Dispatcher 关停 → 停全部捕获代理（清理 mitmdump 进程）
+            if self._capture_manager is not None:
+                try:
+                    self._capture_manager.stop_all()
+                except Exception as exc:  # noqa: BLE001
+                    self.log(f"capture proxy stop_all 失败: {exc!r}")
         self.log("dispatch loop: shutdown")
         return 0
 
@@ -216,6 +281,12 @@ class DispatcherLoop:
             self.ctx.force_kill(f"kill_switch:{eid}")
         except Exception as exc:  # noqa: BLE001
             self.log(f"force_kill 失败: {exc!r}")
+        # C3：kill 联动停抓包（熔断即停代理进程 + 释放端口）
+        if self._capture_manager is not None:
+            try:
+                self._capture_manager.stop_engagement(eid)
+            except Exception as exc:  # noqa: BLE001
+                self.log(f"stop capture proxy({eid}) 失败: {exc!r}")
         for pid in self._project_ids_for(eid):
             try:
                 self.backend.cleanup_managed_container(pid, reason="kill_switch")
@@ -311,6 +382,8 @@ class DispatcherLoop:
             return None
         if not self._check_auth_window(eng):
             return None
+        # 真实抓包：active engagement 首次派发前启动 per-engagement 捕获代理（幂等）
+        self._ensure_capture(eng)
         for fn in (
             self._maybe_bootstrap,
             self._maybe_reason,
@@ -322,6 +395,74 @@ class DispatcherLoop:
             if result is not None:
                 return result
         return None
+
+    # ==================================================================
+    # 真实抓包接线（缺口 2：Dispatcher 侧 CaptureProxyManager 生命周期）
+    # ==================================================================
+
+    def _authorized_targets(self, eid: str) -> list[dict]:
+        """拉 targets（C11：allow 白名单由 authorized targets 派生）。"""
+        try:
+            return self.client.list_targets(eid) or []
+        except CairnClientError as exc:
+            self.log(f"list_targets({eid}) 失败: {exc}")
+            return []
+
+    def _ensure_capture(self, eng: Mapping[str, Any]) -> None:
+        """active engagement 首次派发前启动捕获代理（幂等）。
+
+        读 ``scope_policy.capture_proxy.enabled``（DDL §2.1）；启用且未运行 →
+        ``start_engagement``（生成 CA + 拉起 mitmdump + addon 环境）。targets 派生
+        白名单（fail-closed）；白名单热刷新由服务端 ``server_assert_capture_allowed``
+        兜底（F5/C11），代理本地白名单重启即更新。
+        """
+        if self._capture_manager is None:
+            return
+        eid = str(eng.get("id") or "")
+        if not eid:
+            return
+        if self._capture_manager.is_running(eid):
+            return
+        try:
+            scope_policy = self.client.get_engagement_scope(eid)
+        except CairnClientError as exc:
+            self.log(f"get_engagement_scope({eid}) 失败: {exc}")
+            return
+        cp = scope_policy.get("capture_proxy") or {}
+        if not cp.get("enabled"):
+            return
+        try:
+            from ..capture.client import derive_whitelist
+
+            wl = derive_whitelist(self._authorized_targets(eid), scope_policy)
+            self._capture_manager.start_engagement(
+                eid,
+                scope_policy,
+                server_url=self.config.server.url,
+                capture_token=os.environ.get(self.config.security.capture_token_env) or "",
+                traffic_root=self.config.security.traffic_root,
+                allow_hosts=sorted(wl.allow_capture_hosts),
+                no_hosts=sorted(wl.no_capture_hosts),
+            )
+        except Exception as exc:  # noqa: BLE001 —— 代理启动失败不崩循环（缺 mitmdump 等）
+            self.log(f"start capture proxy({eid}) 失败: {exc!r}")
+
+    def _reconcile_capture_proxies(self) -> None:
+        """periodic 对账：对 active 集合增量 start/stop（C3 kill/过期/归档联动）。
+
+        start 已在 ``_process_engagement`` 逐 engagement 幂等触发；这里只处理
+        「不再 active」的代理 → stop（kill/expire/archive 离开 active 集合）。
+        """
+        if self._capture_manager is None:
+            return
+        active = {str(e.get("id")) for e in self._list_active()}
+        for eid in self._capture_manager.running_eids():
+            if eid not in active:
+                try:
+                    self._capture_manager.stop_engagement(eid)
+                    self.log(f"capture proxy 停止（engagement 不再 active）: {eid}")
+                except Exception as exc:  # noqa: BLE001
+                    self.log(f"stop capture proxy({eid}) 失败: {exc!r}")
 
     def _maybe_bootstrap(self, eng: Mapping[str, Any]) -> Optional[TaskResult]:
         eid = str(eng["id"])
@@ -639,6 +780,7 @@ class DispatcherLoop:
                 self.log(f"create_project failed: {exc}")
                 return None
         self._project_id[eid] = pid
+        self._project_to_eid[pid] = eid
         self._runtime_projects.add(pid)
         return pid
 
@@ -738,6 +880,8 @@ class DispatcherLoop:
             self.client._request("POST", "/engagements/expire")
         except CairnClientError as exc:
             self.log(f"expire_engagements failed: {exc}")
+        # C3：捕获代理对账（对 active 集合增量 start/stop；kill/过期/归档 → 停抓包）
+        self._reconcile_capture_proxies()
         # C2 捕获完整性对账（产出 capture_gap 看板，落 scheduler_state）
         for eid in list(self._project_id):
             try:

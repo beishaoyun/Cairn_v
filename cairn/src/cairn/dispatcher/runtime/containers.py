@@ -95,6 +95,72 @@ def _coerce_scope(value: Any) -> ContainerScope:
     )
 
 
+#: 捕获默认豁免主机（与 server/services/capture.DEFAULT_NO_CAPTURE_HOSTS 口径一致）
+_DEFAULT_NO_CAPTURE_HOSTS = ("api.anthropic.com", "api.deepseek.com", "cairn-server")
+#: 容器侧访问 Dispatcher 捕获代理的默认 host（Docker 默认 bridge 网关 IP）
+_DEFAULT_CAPTURE_HOST = "172.17.0.1"
+
+
+def resolve_scope_policy(
+    eid: str,
+    scope_policy: Mapping[str, Any] | None,
+    *,
+    default_capture_host: str | None = None,
+) -> ContainerScope:
+    """把 per-engagement ``scope_policy`` JSON（DDL §2.1）解析为 ``ContainerScope``。
+
+    scope_policy 缺省字段回退到 ``ContainerScope`` 默认值：
+
+    * ``network_cap`` 接受 bool（True → NET_RAW+NET_ADMIN，即沙箱加固 §4 的放行）或
+      显式 cap 列表；False/缺省 → 空列表（全部 drop）；
+    * ``resources.{mem_limit,cpu_quota,pids_limit}`` → 对应资源字段；
+    * ``tools`` → 工具白名单（空/缺省 → 不挂载 /opt/tools）；
+    * ``capture_proxy`` → ``{enabled, host, port, no_capture_hosts}``：
+      ``host`` 优先取 ``capture_proxy.host``，其次 ``default_capture_host``，再次
+      环境变量 ``CAIRN_CAPTURE_HOST``，最后 Docker 默认 bridge 网关（172.17.0.1）；
+      ``no_capture_hosts`` 缺省用默认豁免主机（LLM API / Cairn Server）。
+    """
+    sp = dict(scope_policy or {})
+    raw_caps = sp.get("network_cap")
+    if isinstance(raw_caps, bool):
+        network_cap = ["NET_RAW", "NET_ADMIN"] if raw_caps else []
+    elif raw_caps:
+        network_cap = [str(c) for c in raw_caps]
+    else:
+        network_cap = []
+
+    resources = sp.get("resources") or {}
+    if not isinstance(resources, Mapping):
+        resources = {}
+
+    cp = sp.get("capture_proxy")
+    capture_proxy: dict[str, Any] | None = None
+    if isinstance(cp, Mapping):
+        host = cp.get("host") or default_capture_host
+        if not host:
+            host = os.environ.get("CAIRN_CAPTURE_HOST") or _DEFAULT_CAPTURE_HOST
+        no_hosts = cp.get("no_capture_hosts")
+        capture_proxy = {
+            "enabled": bool(cp.get("enabled", False)),
+            "host": host,
+            "port": int(cp.get("port") or 8080),
+            "no_capture_hosts": (
+                [str(h) for h in no_hosts] if no_hosts else list(_DEFAULT_NO_CAPTURE_HOSTS)
+            ),
+        }
+
+    tools = sp.get("tools")
+    return ContainerScope(
+        engagement_id=eid,
+        network_cap=network_cap,
+        mem_limit=resources.get("mem_limit"),
+        cpu_quota=resources.get("cpu_quota"),
+        pids_limit=resources.get("pids_limit"),
+        tools=list(tools) if tools else None,
+        capture_proxy=capture_proxy,
+    )
+
+
 def _make_worker_writable(path: Path, *, private: bool) -> None:
     """Best-effort: make a host bind-source dir writable by container uid 1000."""
     try:

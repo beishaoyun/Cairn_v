@@ -111,6 +111,16 @@ class CairnClient:
         """单个 engagement 详情。GET /engagements/{eid}"""
         return self._request("GET", f"/engagements/{eid}")
 
+    def get_engagement_scope(self, eid: str) -> dict:
+        """Engagement 的 ``scope_policy`` JSON（DDL §2.1）。
+
+        运行时资源/捕获/复核策略 —— 容器后端用它解析 ``ContainerScope``（capture 代理
+        注入 + CA 信任 + 网络能力 + 资源限制）。``GET /engagements/{eid}`` 已含
+        ``scope_policy`` 字段，本方法只取其值，缺省返回 ``{}``。
+        """
+        eng = self._request("GET", f"/engagements/{eid}")
+        return eng.get("scope_policy") or {}
+
     def set_status(self, eid: str, status: str, *, retest: bool = False) -> dict:
         """状态机流转（planning/active/paused/completed/archived）。PUT /engagements/{eid}/status"""
         return self._request("PUT", f"/engagements/{eid}/status", json={"status": status, "retest": retest})
