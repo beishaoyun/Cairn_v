@@ -11,6 +11,7 @@
 | 角色 | 文档 | 说明 |
 |---|---|---|
 | 总架构 | `docs/architecture-research-report-pentest-v2.md` | v2 唯一权威架构。§4 流程、§6 权限、§7 API/错误码、§8 模块、§12 隐藏规则 |
+| **重建参考** | `docs/architecture-research-report-pentest-v3.md` | **下一代重建唯一开发参考**（12 章：分层架构/数据模型/鉴权/API/核心模块/异步机制/优缺点评估/§11 重构决策清单/§12 隐藏约束）。基于 v2 全量实现的后置分析；当前 v2 构建的权威仍是上两行（v2 架构 + DDL） |
 | 数据 | `docs/database-ddl-draft.md` | **唯一权威 DDL**。建表/索引/约束/迁移/删除语义。§2.1 scope_policy、§4.1 ID 映射 |
 | 覆盖引擎 | `docs/coverage-engine-implementation-spec.md` | §1 DDL+§1.1 默认测试目录、§2 伪代码、§3 输出契约、§4 热力图 |
 | 捕获/复核/进度 | `docs/capture-verify-progress-spec.md` | §2 捕获、§4 verify、§6 复测、§7 进度、§8 存储、§9 安全 |
