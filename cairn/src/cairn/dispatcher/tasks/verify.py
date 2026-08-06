@@ -27,6 +27,7 @@ from .common import (
     CancelledError,
     PayloadError,
     TaskContext,
+    TaskError,
     TaskResult,
     emit_event,
     extract_json,
@@ -273,6 +274,13 @@ def run_verify(
         return TaskResult(status="cancelled", error=str(exc), error_code="CANCELLED")
     try:
         blind = validate_verify_blind_payload(extract_json(blind_text))
+    except TaskError as exc:
+        # accepted=false / 模型拒绝 → 任务 rejected（TV-16；F1 不落任何字段）
+        if getattr(exc, "error_code", "") == "MODEL_REJECTED":
+            emit_event(ctx, "error", "warn", f"verify 模型拒绝（accepted=false）: {exc}")
+            return TaskResult(status="rejected", error=str(exc), error_code="MODEL_REJECTED")
+        emit_event(ctx, "error", "warn", f"verify blind 契约失败: {exc}")
+        return TaskResult(status="failed", error=str(exc), error_code=getattr(exc, "error_code", "VALIDATION"))
     except Exception as exc:  # noqa: BLE001
         emit_event(ctx, "error", "warn", f"verify blind 契约失败: {exc}")
         return TaskResult(status="failed", error=str(exc), error_code=getattr(exc, "error_code", "VALIDATION"))
@@ -295,6 +303,12 @@ def run_verify(
         return TaskResult(status="cancelled", error=str(exc), error_code="CANCELLED")
     try:
         cmp = validate_verify_compare_payload(extract_json(cmp_text), traffic_ids=traffic_ids)
+    except TaskError as exc:
+        if getattr(exc, "error_code", "") == "MODEL_REJECTED":
+            emit_event(ctx, "error", "warn", f"verify comparison 模型拒绝（accepted=false）: {exc}")
+            return TaskResult(status="rejected", error=str(exc), error_code="MODEL_REJECTED")
+        emit_event(ctx, "error", "warn", f"verify comparison 契约失败: {exc}")
+        return TaskResult(status="failed", error=str(exc), error_code=getattr(exc, "error_code", "VALIDATION"))
     except Exception as exc:  # noqa: BLE001
         emit_event(ctx, "error", "warn", f"verify comparison 契约失败: {exc}")
         return TaskResult(status="failed", error=str(exc), error_code=getattr(exc, "error_code", "VALIDATION"))
@@ -306,6 +320,9 @@ def run_verify(
     if verdict == "confirmed" and http_mismatch:
         effective_verdict = "needs_more_evidence"
         emit_event(ctx, "status", "warn", "verify: http_mismatch 检测到 → 降级 needs_more_evidence")
+    # P0 告警（TV-03）：critical 复核 confirmed → error 级事件（前端活动面板置红）
+    if effective_verdict == "confirmed" and cmp.get("verified_severity") == "critical":
+        emit_event(ctx, "error", "error", f"P0 告警：critical 级漏洞复核 confirmed（finding={fid}）")
 
     # 落定 22 apply_verify_runs（POST /findings/{fid}/verify）
     apply_payload = {

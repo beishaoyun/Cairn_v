@@ -28,6 +28,7 @@ from fastapi.testclient import TestClient
 
 from cairn.dispatcher.config import load_dict
 from cairn.dispatcher.protocol.client import CairnClient
+from cairn.dispatcher.runtime.cancellation import TaskCancellation
 from cairn.dispatcher.runtime.context import DispatcherContext
 from cairn.dispatcher.runtime.heartbeat import HeartbeatLease
 from cairn.dispatcher.runtime.local_backend import LocalBackend
@@ -486,6 +487,9 @@ def _assert_no_failed_runs(client, eid):
 
 class TestE2EChain:
     def test_bootstrap_reason_explore_verify(self, tmp_path):
+        # P1-2（F1/TV-10）：verify 必须排除创建者。单 worker 且唯一候选是创建者 → 不派发
+        # （finding 停留 pending_verify）。因此本 E2E 链用两个 worker：mock-A 创建 finding，
+        # mock-B 独立复核（cross_worker），保证 verify 真正落到独立 worker。
         client, cfg = make_server(str(tmp_path))
         eid = create_active_engagement(client)
         config = make_config(
@@ -493,11 +497,14 @@ class TestE2EChain:
                 {"name": "mock-A", "type": "mock",
                  "task_types": ["bootstrap", "reason", "explore", "verify", "audit"],
                  "max_running": 2, "priority": 0, "verify_eligible": True},
+                {"name": "mock-B", "type": "mock",
+                 "task_types": ["bootstrap", "reason", "explore", "verify", "audit"],
+                 "max_running": 2, "priority": 0, "verify_eligible": True},
             ]
         )
         driver = make_full_mock_driver()
         logs: list[str] = []
-        ctx = make_ctx(config, drivers={"mock-A": driver}, log=logs.append)
+        ctx = make_ctx(config, drivers={"mock-A": driver, "mock-B": driver}, log=logs.append)
         backend = LocalBackend(config, workspace_root=str(tmp_path / "ws"))
         loop = DispatcherLoop(ctx, client=client, backend=backend, interval=0.01)
 
@@ -567,6 +574,86 @@ class TestE2EChain:
 
 
 # ===========================================================================
+# 6b. verify 独立性派发（F1 / TV-10）
+# ===========================================================================
+
+
+class TestVerifyIndependence:
+    def test_single_worker_creator_not_dispatched(self, tmp_path):
+        """F1/TV-10：单 worker 且唯一 verify 候选是创建者 → 不派发（停留 pending_verify）。
+
+        50 审计 P1-2：原 loop 单 worker 兜底 cross_run 会把 verify 派给创建者本人。
+        修复后必须排除创建者；无独立候选 → 不派发，finding 标 pending_verify 等待独立复核。
+        """
+        client, cfg = make_server(str(tmp_path))
+        eid = create_active_engagement(client)
+        config = make_config(
+            workers=[
+                {"name": "mock-A", "type": "mock",
+                 "task_types": ["bootstrap", "reason", "explore", "verify", "audit"],
+                 "max_running": 2, "priority": 0, "verify_eligible": True},
+            ]
+        )
+        # 直接种一个 open finding，创建者 = mock-A（唯一 worker）
+        fid = client.create_finding(
+            eid,
+            {"title": "SQLi", "severity": "high", "asset": "http://10.0.0.5:8080/login",
+             "description": "login reflects SQL error"},
+            detected_by="mock-A",
+        )["id"]
+        driver = make_full_mock_driver()
+        ctx = make_ctx(config, drivers={"mock-A": driver})
+        backend = LocalBackend(config, workspace_root=str(tmp_path / "ws"))
+        loop = DispatcherLoop(ctx, client=client, backend=backend, interval=0.01)
+        loop._bootstrap_done.add(eid)  # 跳过 bootstrap/reason/explore，直达 verify 判定
+
+        loop.step()
+
+        # 无 verify 任务派发（绝不派发给创建者本人，F1/TV-10）
+        rows = client._request("GET", f"/engagements/{eid}/tasks")
+        assert all(r["task_type"] != "verify" for r in rows), rows
+        # finding 停留 pending_verify（等待独立复核）
+        f = client._request("GET", f"/engagements/{eid}/findings/{fid}")
+        assert f["status"] == "pending_verify", f
+
+    def test_two_workers_verify_goes_to_non_creator(self, tmp_path):
+        """F1：双 worker（A=创建者，B 独立）→ verify 派给 B（cross_worker），非创建者。"""
+        client, cfg = make_server(str(tmp_path))
+        eid = create_active_engagement(client)
+        config = make_config(
+            workers=[
+                {"name": "mock-A", "type": "mock",
+                 "task_types": ["bootstrap", "reason", "explore", "verify", "audit"],
+                 "max_running": 2, "priority": 0, "verify_eligible": True},
+                {"name": "mock-B", "type": "mock",
+                 "task_types": ["bootstrap", "reason", "explore", "verify", "audit"],
+                 "max_running": 2, "priority": 0, "verify_eligible": True},
+            ]
+        )
+        fid = client.create_finding(
+            eid,
+            {"title": "SQLi", "severity": "high", "asset": "http://10.0.0.5:8080/login",
+             "description": "login reflects SQL error"},
+            detected_by="mock-A",
+        )["id"]
+        driver = make_full_mock_driver()
+        ctx = make_ctx(config, drivers={"mock-A": driver, "mock-B": driver})
+        backend = LocalBackend(config, workspace_root=str(tmp_path / "ws"))
+        Path(tmp_path / "ws").mkdir(parents=True, exist_ok=True)  # LocalBackend cwd 需存在
+        loop = DispatcherLoop(ctx, client=client, backend=backend, interval=0.01)
+        loop._bootstrap_done.add(eid)
+
+        loop.step()
+
+        rows = client._request("GET", f"/engagements/{eid}/tasks")
+        verify_runs = [r for r in rows if r["task_type"] == "verify"]
+        assert verify_runs, f"verify should be dispatched with 2 workers, got {rows}"
+        # 派发到非创建者（mock-B），且 independence=cross_worker（outcome_note 记录）
+        assert verify_runs[0]["worker"] == "mock-B", verify_runs
+        assert verify_runs[0]["status"] == "success", verify_runs
+
+
+# ===========================================================================
 # 7. kill 即时性（模拟，无 Docker）
 # ===========================================================================
 
@@ -604,3 +691,41 @@ class TestKillSwitch:
         loop._running["task-001"] = {"eid": "e-001", "cancellation": None}
         loop._handle_kill("e-001")
         assert force, "kill switch must call ctx.force_kill (C1 SIGKILL path)"
+
+    def test_kill_monitor_kills_running_task_immediately(self, tmp_path):
+        """C1 熔断即时性（50 审计 P1-3）：任务运行期间 kill_switch 触发 → 绑定进程立即
+        SIGKILL，不等 communicate 返回。主循环同步阻塞在 communicate，靠后台 kill 监控
+        线程轮询 kill_switch 并调用 cancellation.kill_switch()（即时 SIGKILL）。
+        """
+        client, cfg = make_server(str(tmp_path))
+        eid = create_active_engagement(client)
+        config = make_config()
+        ctx = make_ctx(config)
+        backend = LocalBackend(config, workspace_root=str(tmp_path / "ws"))
+        Path(tmp_path / "ws").mkdir(parents=True, exist_ok=True)  # LocalBackend cwd 需存在
+        loop = DispatcherLoop(ctx, client=client, backend=backend, interval=0.01)
+
+        # 模拟 30 run_worker_phase 的挂载：阻塞进程 attach 到 TaskCancellation
+        cancellation = TaskCancellation()
+        proc = backend.build_exec_process(["sleep", "30"], timeout=60)
+        cancellation.attach_process(proc)
+        loop._running["task-001"] = {
+            "run_id": "task-001", "eid": eid, "pid": None,
+            "task_type": "verify", "worker": "mock-A", "cancellation": cancellation,
+        }
+
+        loop._start_kill_monitor()
+        try:
+            client.kill(eid)  # 服务端置 kill_switch（模拟运行中触发熔断）
+            deadline = time.time() + 5.0
+            while time.time() < deadline and proc.poll() is None:
+                time.sleep(0.05)
+            assert proc.poll() is not None, (
+                "kill_switch 触发后运行中进程应被立即 SIGKILL（C1），而非等 communicate 返回"
+            )
+            assert cancellation.cancelled
+        finally:
+            if proc.poll() is None:  # 兜底清理：确保子进程被回收
+                proc.kill(None)
+            ctx.shutdown.set()
+            loop._stop_kill_monitor()

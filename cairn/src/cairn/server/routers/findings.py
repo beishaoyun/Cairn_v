@@ -578,8 +578,9 @@ def trigger_replay(
 @router.get("/{fid}/replay")
 def list_replay(engagement_id: str, fid: str, db: sqlite3.Connection = Depends(get_db)):
     _require_finding(db, engagement_id, fid)
+    # replay_runs 无 created_at 列（DDL §9.3），按 started_at 排序（41 交接注）。
     rows = db.execute(
-        "SELECT * FROM replay_runs WHERE finding_id=? ORDER BY created_at DESC", (fid,)
+        "SELECT * FROM replay_runs WHERE finding_id=? ORDER BY started_at DESC", (fid,)
     ).fetchall()
     db.commit()
     return {"items": [dict(r) for r in rows]}

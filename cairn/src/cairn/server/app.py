@@ -158,8 +158,8 @@ def create_app(config: ServerConfig | None = None) -> FastAPI:
     def projects_placeholder(engagement_id: str | None = None):
         """占位端点：由 25-graph-subdomain 接管（skeleton §2.4）。
 
-        此处返回空列表以满足健康冒烟（GET /projects 200）；auth 中间件对其豁免，
-        业务路由接管后由编排者决定是否收窄豁免。
+        此处返回空列表作为兜底；auth 中间件**不再豁免** GET /projects（P1-4 收窄，
+        50 审计）——无 token 访问返回 401，不得枚举项目元数据。
         """
         return []
 

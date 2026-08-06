@@ -1,2 +1,0 @@
-# 前端构建产物目录（Vite dist，阶段 3 由 42-frontend 产出）。
-# app._mount_static 仅在存在 index.html 时挂载，空目录不参与路由。

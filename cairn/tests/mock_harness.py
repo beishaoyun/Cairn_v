@@ -390,11 +390,16 @@ def build_mock_workers(
 
 def seed_traffic(client: Any, eid: str, *traffic_ids: str, role: str = "trigger",
                  payload: Mapping[str, Any] | None = None) -> None:
-    """Preload ``traffic_entries`` via ``POST /engagements/{eid}/traffic``.
+    """Preload ``traffic_entries`` with the exact ids the scenarios reference.
 
-    Uses the capture write-back endpoint (the proxy's only writer, F8). In tests
-    this is called with the capture token client (or the router's index path).
+    The production proxy write-back endpoint (``POST /engagements/{eid}/traffic``,
+    F8) auto-generates ids, so tests seed exact ids (``tr-001`` etc.) directly into
+    the temp DB. When ``client`` exposes ``db_path``/``traffic_root`` the rows are
+    inserted + payload files written directly (E2E seeding only); otherwise it
+    falls back to the capture-token API.
     """
+    import datetime
+
     if not traffic_ids:
         traffic_ids = ("tr-001", "tr-002")
     base = dict(
@@ -402,13 +407,70 @@ def seed_traffic(client: Any, eid: str, *traffic_ids: str, role: str = "trigger"
         or {
             "request_bytes": b"GET /login HTTP/1.1\r\nHost: 10.0.0.5\r\n\r\n",
             "response_bytes": b"HTTP/1.1 200 OK\r\n\r\nSQL error near 'OR 1=1'",
+            "method": "GET",
+            "url": "http://10.0.0.5:8080/login",
+            "status": 200,
         }
     )
-    for tid in traffic_ids:
-        resp = client.post(
-            f"/engagements/{eid}/traffic",
-            json={"traffic_id": tid, "role": role, **base},
-        )
+    db_path = getattr(client, "db_path", None)
+    traffic_root = getattr(client, "traffic_root", None)
+    if db_path is not None:
+        import sqlite3
+        from pathlib import Path
+
+        req = base.get("request_bytes", b"GET /login HTTP/1.1\r\nHost: 10.0.0.5\r\n\r\n")
+        resp = base.get("response_bytes", b"HTTP/1.1 200 OK\r\n\r\nSQL error near 'OR 1=1'")
+        if isinstance(req, str):
+            req = req.encode("utf-8")
+        if isinstance(resp, str):
+            resp = resp.encode("utf-8")
+        root = Path(traffic_root or ".")
+        now = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        conn = sqlite3.connect(db_path)
+        try:
+            for i, tid in enumerate(traffic_ids):
+                req_path = f"e2e/{tid}.req"
+                resp_path = f"e2e/{tid}.resp"
+                if root is not None:
+                    (root / req_path).parent.mkdir(parents=True, exist_ok=True)
+                    (root / req_path).write_bytes(req)
+                    (root / resp_path).parent.mkdir(parents=True, exist_ok=True)
+                    (root / resp_path).write_bytes(resp)
+                conn.execute(
+                    "INSERT OR REPLACE INTO traffic_entries "
+                    "(id, engagement_id, seq, captured_at, method, url, host, client, client_ip, "
+                    " status, req_path, resp_path, req_bytes, resp_bytes, content_type, sha256, "
+                    " chunk_count, archived, archived_path, finding_linked) "
+                    "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,0,NULL,0)",
+                    (
+                        tid, eid, i + 1, now,
+                        base.get("method", "GET"), base.get("url", "http://10.0.0.5:8080/login"),
+                        base.get("host"), base.get("client") or "proxy", base.get("client_ip"),
+                        base.get("status"), req_path, resp_path, len(req), len(resp),
+                        base.get("content_type"), base.get("sha256"), 1,
+                    ),
+                )
+        finally:
+            conn.commit()
+            conn.close()
+        return
+    if hasattr(client, "_request"):
+        # CairnClient（捕获代理受限 token 客户端，F8）—— id 由服务端自动生成。
+        idx = {
+            "method": base.get("method", "GET"),
+            "url": base.get("url", "http://10.0.0.5:8080/login"),
+            "status": base.get("status"),
+            "req_path": f"/{traffic_ids[0]}.req",
+            "resp_path": f"/{traffic_ids[0]}.resp",
+            "req_bytes": len(base.get("request_bytes") or b""),
+            "resp_bytes": len(base.get("response_bytes") or b""),
+            "client": "proxy",
+        }
+        if base.get("sha256"):
+            idx["sha256"] = base["sha256"]
+        client._request("POST", f"/engagements/{eid}/traffic", json=idx)
+    else:
+        resp = client.post(f"/engagements/{eid}/traffic", json={"traffic_id": traffic_ids[0], "role": role, **base})
         assert resp.status_code < 400, resp.text
 
 
@@ -428,7 +490,11 @@ def seed_replay_evidence(
 
 def seed_finding(client: Any, eid: str, *, payload: Mapping[str, Any] | None = None,
                  detected_by: str = "worker-A") -> str:
-    """Create an open finding via ``POST /engagements/{eid}/findings``."""
+    """Create an open finding via ``POST /engagements/{eid}/findings``.
+
+    ``detected_by`` goes in the JSON body (the findings router reads it from the
+    body, not a query param — a wiring fix for the TV matrix, 2026-08-06).
+    """
     body = dict(
         payload
         or {
@@ -440,34 +506,186 @@ def seed_finding(client: Any, eid: str, *, payload: Mapping[str, Any] | None = N
             "traffic_ids": ["tr-001"],
         }
     )
-    resp = client.post(
-        f"/engagements/{eid}/findings", json=body, params={"detected_by": detected_by}
-    )
+    body.setdefault("detected_by", detected_by)
+    body.setdefault("actor", "agent")
+    if hasattr(client, "create_finding"):
+        # CairnClient — the JSON body matches the findings router DTO.
+        resp = client.create_finding(eid, body, detected_by=detected_by, actor="agent")
+        assert resp.get("id"), resp
+        return resp["id"]
+    resp = client.post(f"/engagements/{eid}/findings", json=body)
     assert resp.status_code < 400, resp.text
     return resp.json()["id"]
 
 
-def pump_until_idle(dispatch: Any, timeout: float = 30.0) -> None:
-    """Pump a DispatcherLoop until it reports no pending work or ``timeout``.
+def _count_tasks(client: Any, eid: str) -> int:
+    """Number of task_runs for an engagement (via the CairnClient)."""
+    try:
+        rows = client._request("GET", f"/engagements/{eid}/tasks") or []
+    except Exception:  # noqa: BLE001 —— pump 期间任务列表查询失败按 0 处理
+        return 0
+    return len(rows)
 
-    Works with any object exposing either ``pump_until_idle()`` (40's loop) or
-    ``step()`` (a manual tick). Skips when ``dispatch`` is ``None``.
-    """
+
+def _drain_steps(dispatch: Any, loop: Any, timeout: float) -> None:
+    """Step a DispatcherLoop until two consecutive steps create no task_run."""
     import time
 
+    client = getattr(dispatch, "_client", None)
+    eid = getattr(dispatch, "_eid", None)
+    deadline = time.monotonic() + timeout
+    idle_streak = 0
+    steps = 0
+    while time.monotonic() < deadline and steps < 2000:
+        steps += 1
+        before = _count_tasks(client, eid) if (client is not None and eid) else None
+        loop.step()
+        after = _count_tasks(client, eid) if (client is not None and eid) else None
+        if before is not None and after is not None and after == before:
+            idle_streak += 1
+            if idle_streak >= 2:
+                break
+        else:
+            idle_streak = 0
+        time.sleep(0.005)
+
+
+def pump_until_idle(dispatch: Any, timeout: float = 60.0) -> None:
+    """Pump a DispatcherLoop until it reports no pending work or ``timeout``.
+
+    ``dispatch`` may be a :class:`DispatchView` (loop + client + eid), a
+    :class:`DispatcherLoop` with its own ``pump_until_idle``/``step()``, or
+    ``None``. Idle is detected by two consecutive steps that create no new
+    task_run.
+    """
     if dispatch is None:
+        return
+    loop = getattr(dispatch, "_loop", None)
+    if loop is not None:
+        # DispatchView —— 直接 drain，避免 hasattr 无限递归
+        _drain_steps(dispatch, loop, timeout)
         return
     if hasattr(dispatch, "pump_until_idle"):
         dispatch.pump_until_idle(timeout=timeout)
         return
-    deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline:
-        before = getattr(dispatch, "pending_count", lambda: 0)()
-        dispatch.step()
-        after = getattr(dispatch, "pending_count", lambda: 0)()
-        if after == 0 and before == 0:
-            break
-        time.sleep(0.01)
+    _drain_steps(dispatch, dispatch, timeout)
+
+
+class DispatchView:
+    """Thin wrapper around a ``DispatcherLoop`` exposing the E2ECtx accessors.
+
+    The 46 TV scenarios rely on ``task_run(run_id)`` / ``events(run_id)`` and a
+    ``pump_until_idle`` that drains the loop. The 40 ``DispatcherLoop`` only has
+    ``step()``/``run()``, so this view adapts the loop + client to the harness
+    contract (2026-08-06, P1-1 wiring).
+    """
+
+    def __init__(self, loop: Any, client: Any, eid: str, *, db_path: str | None = None) -> None:
+        self._loop = loop
+        self._client = client
+        self._eid = eid
+        self.db_path = db_path
+
+    # --- E2ECtx accessors -------------------------------------------------
+    def task_run(self, run_id: str) -> dict:
+        return self._client._request("GET", f"/tasks/{run_id}")
+
+    def events(self, run_id: str) -> list[dict]:
+        resp = self._client._request("GET", f"/tasks/{run_id}/events")
+        return resp.get("items") if isinstance(resp, dict) else resp or []
+
+    def step(self) -> None:
+        return self._loop.step()
+
+    def pump_until_idle(self, timeout: float = 60.0) -> None:
+        pump_until_idle(self, timeout=timeout)
+
+    def find_verify_run_id(self, fid: str) -> str:
+        """Map a finding to its latest verify task_run id via the DB.
+
+        ``task_runs`` has no ``finding_id`` column, so the mapping is recovered
+        from ``verify_runs.task_run_id`` (the loop passes ``ctx.run_id`` there).
+        When the verify task failed *before* applying a verdict (contract /
+        exception scenarios such as TV-13/16/17), no ``verify_runs`` row exists,
+        so we fall back to the latest ``task_type=verify`` task_run.
+        """
+        import sqlite3
+
+        conn = sqlite3.connect(self.db_path)
+        try:
+            row = conn.execute(
+                "SELECT task_run_id FROM verify_runs WHERE finding_id=? "
+                "ORDER BY created_at DESC LIMIT 1",
+                (fid,),
+            ).fetchone()
+            if row is not None:
+                return str(row[0])
+        finally:
+            conn.close()
+        rows = self._client._request("GET", f"/engagements/{self._eid}/tasks") or []
+        verify = [r for r in rows if r.get("task_type") == "verify"]
+        if not verify:
+            raise AssertionError(f"no verify run for {fid}")
+        verify.sort(key=lambda r: r.get("started_at") or "")
+        return str(verify[-1]["id"])
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._loop, name)
+
+
+class _Resp:
+    """Minimal Response-like object so harness helpers work against a CairnClient."""
+
+    def __init__(self, status_code: int, data: Any) -> None:
+        self.status_code = status_code
+        self._data = data
+        self.text = json.dumps(data, ensure_ascii=False) if not isinstance(data, str) else data
+
+    def json(self) -> Any:
+        return self._data
+
+
+class E2EHttpClient:
+    """Wrap a :class:`CairnClient` to expose raw-HTTP-style ``get/post/put``.
+
+    The 46 TV scenarios and the harness assertion helpers call
+    ``client.get(f"/engagements/{eid}/...")`` and expect a Response-like object
+    with ``status_code`` / ``json()`` / ``text``, while the DispatcherLoop needs
+    the full ``CairnClient`` method surface. This wrapper provides both: path
+    requests return ``_Resp``; every other attribute (``create_finding``,
+    ``_request``, ``list_items``, ...) is delegated to the underlying client.
+    """
+
+    def __init__(self, client: Any) -> None:
+        self._client = client
+
+    def _call(self, method: str, path: str, **kw: Any) -> _Resp:
+        try:
+            data = self._client._request(method, path, **kw)
+            return _Resp(200, data)
+        except Exception as exc:  # noqa: BLE001 —— CairnClientError surface as _Resp
+            from cairn.dispatcher.errors import CairnClientError
+
+            if isinstance(exc, CairnClientError):
+                return _Resp(exc.http_status or 500, {
+                    "error_code": exc.error_code, "message": str(exc), "detail": exc.detail,
+                })
+            raise
+
+    def get(self, path: str, **kw: Any) -> _Resp:
+        return self._call("GET", path, **kw)
+
+    def post(self, path: str, **kw: Any) -> _Resp:
+        return self._call("POST", path, **kw)
+
+    def put(self, path: str, **kw: Any) -> _Resp:
+        return self._call("PUT", path, **kw)
+
+    def delete(self, path: str, **kw: Any) -> _Resp:
+        return self._call("DELETE", path, **kw)
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._client, name)
 
 
 # ---- assertion helpers (§3.4 of verify-mock-test-spec) ----------------------
@@ -507,7 +725,12 @@ def assert_http_mismatch(client: Any, eid: str, fid: str) -> None:
 
 def assert_replay_run(client: Any, eid: str, fid: str, *, result: str,
                       matched_original: int) -> None:
-    runs = client.get(f"/engagements/{eid}/findings/{fid}/replay").json()
+    resp = client.get(f"/engagements/{eid}/findings/{fid}/replay")
+    if hasattr(resp, "json"):
+        data = resp.json()
+    else:
+        data = resp
+    runs = data.get("items") if isinstance(data, dict) and "items" in data else data
     assert any(r["result"] == result for r in runs), runs
     if matched_original is not None:
         assert any(r.get("matched_original") == matched_original for r in runs), runs
@@ -520,7 +743,7 @@ def assert_retest_pass(client: Any, eid: str, fid: str, *, count: int | None = N
     if count is not None:
         assert rp == count, f"retest_pass={rp} != {count}"
     if kinds is not None:
-        details = {r.get("kind") for r in f.get("retest_confirmations", [])}
+        details = {r.get("kind") for r in f.get("retest", {}).get("details", [])}
         assert kinds <= details, details
 
 
@@ -536,7 +759,12 @@ def assert_worker_exclusion(dispatch: Any, run_id: str, creator: str) -> None:
 
 
 def assert_audit_run(client: Any, eid: str, *, item_id: str, verdict: str) -> None:
-    audits = client.get(f"/engagements/{eid}/coverage/audit").json()
+    resp = client.get(f"/engagements/{eid}/coverage/audit")
+    if hasattr(resp, "json"):
+        data = resp.json()
+    else:
+        data = resp
+    audits = data.get("items") if isinstance(data, dict) and "items" in data else data
     assert any(
-        a.get("item_id") == item_id and a.get("verdict") == verdict for a in audits
+        a.get("coverage_item_id") == item_id and a.get("verdict") == verdict for a in audits
     ), audits

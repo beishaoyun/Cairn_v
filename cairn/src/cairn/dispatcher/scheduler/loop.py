@@ -27,6 +27,7 @@
 from __future__ import annotations
 
 import json
+import threading
 import time
 from datetime import datetime, timezone
 from typing import Any, Callable, Iterable, Mapping, Optional
@@ -165,11 +166,13 @@ class DispatcherLoop:
     def run(self) -> int:
         self._load_state()
         self._startup_reconcile()
+        self._start_kill_monitor()
         try:
             while not self.shutdown.is_set():
                 self.step()
                 self.shutdown.wait(self.interval)
         finally:
+            self._stop_kill_monitor()
             self._heartbeat.stop()
         self.log("dispatch loop: shutdown")
         return 0
@@ -218,6 +221,56 @@ class DispatcherLoop:
                 self.backend.cleanup_managed_container(pid, reason="kill_switch")
             except Exception as exc:  # noqa: BLE001
                 self.log(f"cleanup_managed_container({pid}) 失败: {exc!r}")
+
+    #: kill 监控轮询间隔（C1 熔断即时性）。独立于主循环 interval——任务运行期间
+    #: 主循环阻塞在 ``communicate``，本线程以该间隔轮询 kill_switch，保证触发即
+    #: SIGKILL（不等任务返回）。
+    _KILL_MONITOR_POLL = 0.2
+
+    def _start_kill_monitor(self) -> None:
+        """后台线程：任务运行期间监控 kill_switch，触发即 SIGKILL（C1）。
+
+        主循环同步执行任务（``communicate`` 阻塞），kill switch 置位要等任务返回才被
+        主循环观察到。本线程在运行任务期间轮询 ``list_active()`` 的 kill_switch，一旦
+        发现运行中任务所属 engagement 熔断 → 立即 ``cancellation.kill_switch()``
+        （即时 SIGKILL 绑定进程，C1 不走 grace），不等 communicate 返回。
+        30 的 ``run_worker_phase`` 已把进程 attach 到 ``TaskCancellation``（13 §7），
+        这里补上「kill 触发 → cancel()」的触发链路。
+        """
+        if getattr(self, "_kill_monitor", None) is not None:
+            return
+
+        def _monitor() -> None:
+            while not self.shutdown.is_set():
+                if self._running:
+                    kill_eids = self._kill_switch_eids()
+                    if kill_eids:
+                        for _run_id, rec in list(self._running.items()):
+                            if rec.get("eid") in kill_eids:
+                                cancellation = rec.get("cancellation")
+                                if cancellation is not None:
+                                    cancellation.kill_switch(f"kill_switch:{rec['eid']}")
+                self.shutdown.wait(self._KILL_MONITOR_POLL)
+
+        t = threading.Thread(target=_monitor, daemon=True, name="cairn-kill-monitor")
+        self._kill_monitor = t
+        t.start()
+
+    def _stop_kill_monitor(self) -> None:
+        """停 kill 监控线程（join 短暂，守护线程；run() finally 调用）。"""
+        t = getattr(self, "_kill_monitor", None)
+        self._kill_monitor = None
+        if t is not None:
+            t.join(timeout=1.0)
+
+    def _kill_switch_eids(self) -> set[str]:
+        """当前 kill_switch 已置位的 active engagement id 集合（C1 熔断）。"""
+        try:
+            active = self._list_active() or []
+        except CairnClientError as exc:
+            self.log(f"kill monitor list_active failed: {exc}")
+            return set()
+        return {str(e.get("id")) for e in active if e.get("kill_switch")}
 
     def _check_auth_window(self, eng: Mapping[str, Any]) -> bool:
         """授权窗口守卫：窗口外拒绝派发（到期 pause 由 periodic expire_engagements 落实，B5）。"""
@@ -428,14 +481,21 @@ class DispatcherLoop:
             )
             independence = "cross_worker"
             if worker is None:
-                # 单 worker 兜底降级 cross_run（F7：最终仍需人工确认）
+                # F7 单 worker 兜底降级 cross_run —— **仅当存在「独立于创建者」的候选时**。
+                # select_worker 显式排除创建者（F1）：唯一候选是创建者 → None → 不派发。
                 worker = select_worker(
                     self.config.workers, task_type="verify", health=self.health,
                     rejected_until=self._rejected_until, running_counts=self._worker_running,
+                    creator=creator,
                 )
+                if worker is None:
+                    # 无独立复核候选：若确实不存在任何「非创建者 verify 候选」→ TV-10
+                    # 不派发，finding 标 pending_verify 等待独立复核；若只是并发/健康
+                    # 暂时不可用（存在独立 worker）→ 保持 open，下轮再试，避免卡死。
+                    if not self._has_independent_verify_worker(creator):
+                        self._mark_waiting_independent_verify(eid, fid, creator)
+                    continue
                 independence = "cross_run"
-            if worker is None:
-                continue
             driver = self.drivers.get(worker)
             if driver is None:
                 continue
@@ -451,6 +511,34 @@ class DispatcherLoop:
             )
             return result
         return None
+
+    def _has_independent_verify_worker(self, creator: str) -> bool:
+        """是否存在「独立于创建者」的 verify 候选（F1）。
+
+        与 fallback ``select_worker(creator=creator)`` 同口径：忽略健康/并发过滤，
+        仅判断配置中是否存在 name≠creator 且声明 ``verify`` 的 worker。返回 False 表示
+        唯一可 verify 的 worker 即创建者本人（TV-10：不派发，等待独立复核）。
+        """
+        for w in self.config.workers:
+            if getattr(w, "name", "") == creator:
+                continue
+            if "verify" in (getattr(w, "task_types", None) or ()):
+                return True
+        return False
+
+    def _mark_waiting_independent_verify(self, eid: str, fid: str, creator: str) -> None:
+        """TV-10：无独立复核候选 → finding 标 ``pending_verify`` 等待独立复核（F1）。
+
+        与 ``_mark_pending_verify`` 不同：不派发任务，仅置状态 + 审计 note。
+        ``open → pending_verify`` 为机器可流转边（capture spec §5）。
+        """
+        try:
+            self.client._request(
+                "PUT", f"/engagements/{eid}/findings/{fid}",
+                json={"status": "pending_verify", "note": "等待独立复核", "actor": creator},
+            )
+        except CairnClientError as exc:
+            self.log(f"mark waiting independent verify failed: {exc}")
 
     def _maybe_audit(self, eng: Mapping[str, Any]) -> Optional[TaskResult]:
         """覆盖抽样复核（F3）。

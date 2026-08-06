@@ -1,7 +1,8 @@
 """10-server-foundation 验收测试。
 
 覆盖：建库/表数/PRAGMA、计数器自增、settings PUT→GET、401/422/404 错误码形状、
-GET /projects 与 /health 豁免冒烟、v1→v2 迁移、DELETE engagement 级联删除。
+GET /health 豁免冒烟、GET /projects 无 token 401（P1-4 收窄）、v1→v2 迁移、
+DELETE engagement 级联删除。
 """
 
 from __future__ import annotations
@@ -253,7 +254,7 @@ def test_422_validation_shape(db_path):
 
 
 # ---------------------------------------------------------------------------
-# 5. 健康冒烟：GET /projects 与 GET /health 豁免鉴权 → 200
+# 5. 健康冒烟：GET /health 豁免 → 200；GET /projects 不再豁免（P1-4 收窄）→ 401
 # ---------------------------------------------------------------------------
 
 
@@ -261,9 +262,10 @@ def test_health_and_projects_200(db_path):
     client = TestClient(create_app(make_config(db_path)))
     assert client.get("/health").status_code == 200
     assert client.get("/health").json()["status"] == "ok"
-    r = client.get("/projects")  # 无 token 也应 200（豁免）
-    assert r.status_code == 200
-    assert r.json() == []
+    # P1-4（50 审计）：GET /projects 已从豁免移除 —— 无 token 必须 401，不得枚举项目元数据
+    r = client.get("/projects")
+    assert r.status_code == 401
+    assert r.json()["error_code"] == "AUTH_REQUIRED"
 
 
 def test_version():

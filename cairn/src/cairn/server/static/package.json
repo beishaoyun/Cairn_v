@@ -1,0 +1,15 @@
+{
+  "name": "cairn-frontend",
+  "version": "2.0.0",
+  "private": true,
+  "description": "Cairn v2 渗透测试工作台前端（进度面板 / 覆盖热力图 / Findings / 时间线 / 图工作区 / 报告）",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview"
+  },
+  "devDependencies": {
+    "vite": "^5.4.8"
+  }
+}

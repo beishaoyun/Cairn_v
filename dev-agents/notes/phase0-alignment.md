@@ -135,3 +135,54 @@
 
 ## 36. [phase2/env] 40 未实现
 - audit 自动抽样（需 21 暴露 pending audit 端点）；replay fixed 自动复测（需 41/22 编排）；task_events 原始流清理（服务端 cron）；Docker 下 kill 真实 SIGKILL 中断性（已用 11 接口模拟）。
+
+---
+
+# Phase 3 新增/更新（2026-08-06，50-reviewer 审计后）
+
+> 50 审计结论：P0=0，但未达「从 0 交付」门槛——4 项 P1 + 10 项 P2。详见 `dev-agents/notes/50-reviewer.md`。
+
+## 37. [in_fix] P1-1：TV-01..46 从未运行（e2e_ctx 直接 skip）
+- 46 skipped 恰等于 TV 矩阵数；缺接线代码非红测试。修复 A（接线 Agent）在 P1-2/3/4 修复 B 完成后启动。
+
+## 38. [in_fix] P1-2：单 worker verify 兜底派发给创建者（F1/TV-10 冲突）
+- loop.py:429-436 排除创建者后无候选时 fallback 派给唯一 worker=创建者。修复 B 处理中。
+
+## 39. [in_fix] P1-3：C1 熔断不即时（同步 communicate 阻塞，kill 等任务返回）
+- 修复 B 处理中（kill 触发即 cancel→即时 SIGKILL）。
+
+## 40. [in_fix] P1-4：GET /projects 鉴权豁免未收窄（无 token 可枚举）
+- auth.py:41-42 豁免 + projects 路由无路由级鉴权。修复 B 处理中。
+
+## 41. [phase2] P2-1：FTS5 contentless 不一致
+- coverage spec §1 `content=''` vs DDL §8/db.py 无；FTS 同步触发器全未实现。文档统一（coverage spec 或 DDL），db.py 跟随 DDL。
+
+## 42. [phase2] P2-2：graph spec §2.4 VALIDATION=400 vs 代码 422
+- 文档改 422（同 #17）。
+
+## 43. [phase2] P2-3：skeleton §3 两处签名未同步
+- `apply_audit_verdict`（#21）、`retest_pass_count`（#22）文档↔实现偏离。skeleton 同步到实现，或 21/22 改码（需协调）。
+
+## 44. [phase2] P2-4：「capture 必须 bridge」无运行时代码强制
+- containers.py 仅配置注释；capture 开启 + host 网络不报错。11 加运行时守卫或文档注明。
+
+## 45. [phase2] P2-5：evidence 上传端点 H 标注与实现语义不符
+- skeleton §2.5 标 H，实现 JSON+base64 无 actor gate（Agent 写回也用）。文档注释说明（D2 下仅语义标注）。
+
+## 46. [resolved] P2-6：F8 代理单写者端点确认无问题
+- POST /traffic 豁免主 token + 路由级 require_capture_token 校验正确。
+
+## 47. [env] P2-7：Dockerfile 真实构建/运行留待有权限环境
+- 容器加固仅 fake 单测覆盖（28 passed）。
+
+## 48. [phase2] P2-8：容器名前缀偏离
+- containers.py `cairn-{project_id}` vs graph spec §4-15 `cairn-dispatch-<...>`。文档或代码对齐（低优先）。
+
+## 49. [phase2] P2-9：skeleton §3 open_task_run 参数顺序
+- 服务 `(engagement_id, project_id=None, task_type, worker)` vs 客户端关键字顺序不同，语义一致。文档同步（低优先）。
+
+## 50. [phase2] P2-10：replay_runs 无 created_at / verify_runs 无 engagement_id
+- 报告按 started_at 排序 / stats 经 JOIN。文档或 DDL 加列（报 10，低优先）。
+
+## 51. [phase2] 50 未覆盖项（需后续包或环境）
+- audit 自动抽样派发、replay fixed 自动复测接线、task_events 原始流清理、FTS 同步触发器、mitmproxy 真实集成、executor 侧车、Docker 真实容器验收、前端验收（42 构建中）。

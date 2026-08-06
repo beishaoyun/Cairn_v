@@ -2,9 +2,9 @@
 
 - 读取 ``CAIRN_API_TOKEN``（或 ``ServerConfig.token``），缺/错 → 401
   ``AUTH_REQUIRED`` / ``AUTH_INVALID``；
-- 健康检查豁免：``GET /health`` 与 ``GET /projects``（v2 文档「可豁免」选项）。
-  注：``/projects`` 为 25-graph-subdomain 的占位豁免，业务路由接管后由编排者
-  决定是否收窄（该豁免使无 token 也能列出项目）。
+- 健康检查豁免：``GET /health``（v2 文档「可豁免」选项）。
+  注：``GET /projects`` **不再豁免**（P1-4 收窄，50 审计）——渗透平台服务器不得对
+  未认证调用暴露项目元数据（含 engagement_id/title）；``GET /projects`` 走主 token。
 - D2：T/H 同一 Bearer Token，服务端不做调用方区分。
 """
 
@@ -24,9 +24,10 @@ def default_token_provider() -> str | None:
 
 
 def default_exempt_paths(method: str, path: str) -> bool:
-    """鉴权豁免路径（Agent 23 F8 扩展，2026-08-06）：
+    """鉴权豁免路径（Agent 23 F8 扩展，2026-08-06；P1-4 收窄 2026-08-06）：
 
-    - ``GET /health`` 与 ``GET /projects``：健康冒烟（10 原有）；
+    - ``GET /health``：健康冒烟（10 原有）。**仅此一项无鉴权。**
+      ``GET /projects`` 已从豁免移除（P1-4，50 审计）——无 token 不得枚举项目；
     - ``POST /engagements/{id}/traffic``：捕获代理受限写 token 端点（F8/C5）——主 token
       中间件放行，鉴权由 ``routers/traffic.py#require_capture_token`` 校验
       ``CAIRN_CAPTURE_TOKEN``（代理持受限写 token，非 Bearer 主 token）。精确匹配 4 段路径，
@@ -38,7 +39,13 @@ def default_exempt_paths(method: str, path: str) -> bool:
     """
     if path == "/health":
         return True
-    if method == "GET" and path == "/projects":
+    # 阶段 3 前端静态资源（Vite 源码 / dist）：SPA 无内嵌秘密，浏览器对 <script>/<link>
+    # 无法携带 Authorization 头，故这些 GET 路径必须豁免（API 路由仍走主 token，不受影响）。
+    if method == "GET" and (
+        path == "/"
+        or path == "/index.html"
+        or path.startswith(("/src/", "/assets/", "/dist/"))
+    ):
         return True
     if method == "POST":
         parts = path.split("/")
