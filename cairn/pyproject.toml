@@ -1,0 +1,26 @@
+[project]
+name = "cairn"
+version = "0.2.0"
+description = "Cairn v2 授权渗透测试平台（Cairn Server + Dispatcher）"
+requires-python = ">=3.11"
+dependencies = [
+    "fastapi",
+    "uvicorn[standard]",
+    "pydantic>=2",
+    "PyYAML",
+    "pytest",
+    "httpx",
+]
+
+[project.scripts]
+cairn = "cairn.cli:main"
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
