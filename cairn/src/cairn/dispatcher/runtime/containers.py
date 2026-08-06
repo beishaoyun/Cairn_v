@@ -362,6 +362,18 @@ class ContainerBackend(ExecutionBackend):
             )
 
     def _run_kwargs(self, project_id: str, scope: ContainerScope) -> dict[str, Any]:
+        # C12 / dispatch-config-spec §8 运行时强制：capture 模式必须 bridge 网络。
+        # host 网络下 client_ip 归属反查失效（C12），verify 会全部降级 needs_more_evidence；
+        # host 仅限 local/演练且显式标注「网络层无兜底」。capture_proxy.enabled=true 时
+        # 一旦 network_mode=host → 容器启动拒绝（配置注释不再是唯一提示）。
+        if self._network_mode == "host":
+            cap = scope.capture_proxy or {}
+            if cap.get("enabled"):
+                raise ContainerBackendError(
+                    "capture 模式必须 bridge 网络（C12 / dispatch-config-spec §8）："
+                    "capture_proxy.enabled=true 时禁止 network_mode=host"
+                    "（host 下 client_ip 归属反查失效；仅 local/演练且显式标注无网络层兜底）"
+                )
         caps = list(self._base_cap_add)
         caps += list(scope.network_cap or [])
         caps = list(dict.fromkeys(caps))  # dedupe, preserve order

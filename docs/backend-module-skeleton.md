@@ -123,7 +123,7 @@ src/cairn/
 |---|---|---|---|
 | GET/POST | `/engagements/{id}/findings` | T | 列表/登记 |
 | GET/PUT | `/engagements/{id}/findings/{fid}` | T | 详情/更新（状态升级仅人工） |
-| POST | `/engagements/{id}/findings/{fid}/evidence` | H | 上传证据（白名单） |
+| POST | `/engagements/{id}/findings/{fid}/evidence` | H | 上传证据（JSON+base64，无 multipart；白名单 image/*、text/*、application/pdf + 路径防穿越） |
 | GET/POST | `/engagements/{id}/findings/{fid}/http` | T | 请求/响应包证据列表/登记 |
 | GET | `/engagements/{id}/traffic` | T | 捕获流量索引/检索 |
 | GET | `/engagements/{id}/traffic/{tid}` | T | 还原原始请求/响应全量（`?for_model=true` → digest，F2） |
@@ -143,6 +143,8 @@ src/cairn/
 | GET | `/engagements/{id}/stats` | T | 指标统计（漏洞按 severity 分布 / 覆盖趋势 / 任务成功率） |
 | GET | `/engagements/{id}/findings/export?format=csv\|json` | T | 漏洞清单导出（交付物） |
 | GET | `/engagements/{id}/coverage/export?format=json` | T | 覆盖矩阵导出（含豁免理由/审计） |
+
+> **evidence 端点实现说明（P2-5）**：`POST .../evidence` 实现为 **JSON + base64**（未引入 python-multipart；白名单 image/*、text/*、application/pdf；路径防穿越净化）。`H` 标注仅表示「设计上应由人工操作」的语义——D2 下服务端单 token 无法区分调用方，**Agent 写回（explore 的 evidence_refs 落盘）亦走此端点**可达；实际约束由业务白名单（evidence_refs 相对路径 + 文件存在性校验）落实，而非凭证区分。
 
 ### 2.6 报告
 | 方法 | 路径 | 鉴权 | 说明 |
@@ -199,7 +201,7 @@ def write_coverage_result(conn, eid, *, item_ids, depth_achieved, outcome, fact_
 def waive_item(conn, eid, item_id, *, kind, reason, by) -> Waiver
 def rebuild_for_retest(conn, eid, target_id, test_type_id) -> CoverageItem  # A5：复用原行 retest_round+1 + 状态重置（UNIQUE 下不新建）
 def sample_audit(conn, eid, policy) -> list[AuditRun]                # F3：抽样（A3：实时 priority 口径）+ 异常触发派发
-def apply_audit_verdict(conn, audit_id, *, verdict) -> None          # F3：discrepancy → item 回退 untested + 缺口重排
+def apply_audit_verdict(conn, eid, *, item_id, verdict, auditor, reason='sampling', depth_reached=None, note=None) -> AuditRun  # F3：创建 audit_runs + 落定 verdict 一步式（discrepancy → item 回退 untested + 缺口重排）；无两阶段 confirm_audit_run
 def closure_rule(conn, eid, item) -> bool                            # F11：auto_created 目标覆盖项是否阻塞 report_ready
 def reason_escalation_state(conn, eid) -> bool                       # C8：连续失败/finalize 被拒超限 → 升级 needs_review
 
@@ -214,7 +216,7 @@ def triaged(conn, eid) -> int                                                   
 def apply_verify_runs(conn, fid, *, vr) -> None                                   # F1：verdict 落定 + verified_severity + verify_status
 def bump_reverify(conn, fid) -> bool                                              # F6：reverify_count+1，返回是否超 max_reverify（→needs_review）
 def record_retest_confirmation(conn, fid, *, kind, note, actor) -> None           # A2/C10：写 finding_retest_confirmations（同轮同 kind 幂等）+ 刷新 retest_pass
-def retest_pass_count(conn, fid) -> int                                           # A2/C10：当前 retest_round 下确认账本行数（含 kind 明细）
+def retest_pass_count(conn, fid) -> dict                                          # A2/C10：返回当前 retest_round 下确认账本明细 {retest_round, count, details:[{kind,note,actor,created_at}]}（调用方用 ["count"] 取行数）
 
 # services/capture.py
 def index_traffic(conn, eid, *, entry: dict) -> TrafficEntry        # 代理回写索引（代理唯一写入口）
@@ -229,7 +231,7 @@ def compare_signature(now_resp, orig_resp) -> SignatureMatch        # status + b
 def retest_pass_increment(conn, fid, *, kind) -> None               # 与 services/findings.record_retest_confirmation 同一操作（同轮同 kind 幂等）；统一实现，本签名保留兼容调用
 
 # services/progress.py
-def open_task_run(conn, *, engagement_id, project_id=None, task_type, worker) -> TaskRun  # B2：project_id 可空（verify/audit/replay 为 engagement 级）
+def open_task_run(conn, *, engagement_id, project_id=None, task_type, worker, status='queued', started_at=None, outcome_note=None) -> TaskRun  # B2：project_id 可空（verify/audit/replay 为 engagement 级）；全部 keyword-only，客户端关键字顺序（open_task_run(eid, task_type=..., worker=..., project_id=...)）与之语义一致，参数顺序无关
 def append_event(conn, run_id, *, kind, level, message, raw_path) -> None
 def events_after(conn, run_id, after_seq) -> list[dict]             # SSE 轮询
 def engagement_timeline(conn, eid, *, after_ts=None, limit=200) -> list[dict]   # D3：六源聚合统一时间线

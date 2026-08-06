@@ -154,35 +154,43 @@
 ## 40. [in_fix] P1-4：GET /projects 鉴权豁免未收窄（无 token 可枚举）
 - auth.py:41-42 豁免 + projects 路由无路由级鉴权。修复 B 处理中。
 
-## 41. [phase2] P2-1：FTS5 contentless 不一致
+## 41. [resolved] P2-1：FTS5 contentless 不一致  [P2-cleanup 2026-08-06]
 - coverage spec §1 `content=''` vs DDL §8/db.py 无；FTS 同步触发器全未实现。文档统一（coverage spec 或 DDL），db.py 跟随 DDL。
+- **处理**：coverage spec §1 FTS5 块删除 `content=''`，注释改为「与 DDL §8 / server/db.py 口径一致：非 contentless，常规 FTS5 表，FTS 同步触发器未实现（占位表）」。db.py 不动作（跟随 DDL 权威）。FTS 同步触发器仍属 #51 未实现项。
 
-## 42. [phase2] P2-2：graph spec §2.4 VALIDATION=400 vs 代码 422
+## 42. [resolved] P2-2：graph spec §2.4 VALIDATION=400 vs 代码 422  [P2-cleanup 2026-08-06]
 - 文档改 422（同 #17）。
+- **处理**：graph spec 全篇 VALIDATION 引用（§2.1/§2.3/§2.4 表/§4 规则 1-2/§5 路由表/§7 验收点 2）由 400 → 422，与 errors.py（VALIDATION=http 422）及 test_graph.py 既有断言一致。
 
-## 43. [phase2] P2-3：skeleton §3 两处签名未同步
+## 43. [resolved] P2-3：skeleton §3 两处签名未同步  [P2-cleanup 2026-08-06]
 - `apply_audit_verdict`（#21）、`retest_pass_count`（#22）文档↔实现偏离。skeleton 同步到实现，或 21/22 改码（需协调）。
+- **处理**：skeleton §3 同步到实现——`apply_audit_verdict(conn, eid, *, item_id, verdict, auditor, reason='sampling', depth_reached=None, note=None) -> AuditRun`（一步式，无两阶段 confirm_audit_run）；`retest_pass_count(conn, fid) -> dict`（`{retest_round, count, details}`）。不改码（21/22 交接物已登记偏离）。
 
-## 44. [phase2] P2-4：「capture 必须 bridge」无运行时代码强制
+## 44. [resolved] P2-4：「capture 必须 bridge」无运行时代码强制  [P2-cleanup 2026-08-06]
 - containers.py 仅配置注释；capture 开启 + host 网络不报错。11 加运行时守卫或文档注明。
+- **处理**：`containers.py::_run_kwargs` 顶部新增守卫——`network_mode=host` 且 `scope.capture_proxy.enabled=true` → `ContainerBackendError`（C12）。测试 +3（capture 开+host→拒绝且未创建容器；capture 关+host→正常；capture 开+bridge→正常）。全量 520 passed。
 
-## 45. [phase2] P2-5：evidence 上传端点 H 标注与实现语义不符
+## 45. [resolved] P2-5：evidence 上传端点 H 标注与实现语义不符  [P2-cleanup 2026-08-06]
 - skeleton §2.5 标 H，实现 JSON+base64 无 actor gate（Agent 写回也用）。文档注释说明（D2 下仅语义标注）。
+- **处理**：skeleton §2.5 evidence 行说明改为「JSON+base64，无 multipart；白名单 + 路径防穿越」，并新增注释段说明 `H` 仅语义标注、Agent 写回亦走此端点、业务白名单落实实际约束。
 
 ## 46. [resolved] P2-6：F8 代理单写者端点确认无问题
-- POST /traffic 豁免主 token + 路由级 require_capture_token 校验正确。
+- POST /traffic 豁免主 token + 路由级 require_capture_token 校验正确。 [P2-cleanup 2026-08-06 确认，无改动]
 
 ## 47. [env] P2-7：Dockerfile 真实构建/运行留待有权限环境
-- 容器加固仅 fake 单测覆盖（28 passed）。
+- 容器加固仅 fake 单测覆盖（28 passed → 现 35 passed，含 P2-4 新增）。
 
-## 48. [phase2] P2-8：容器名前缀偏离
+## 48. [resolved] P2-8：容器名前缀偏离  [P2-cleanup 2026-08-06]
 - containers.py `cairn-{project_id}` vs graph spec §4-15 `cairn-dispatch-<...>`。文档或代码对齐（低优先）。
+- **处理**：按「代码改动仅限 P2-4」约束，文档对齐到代码——graph spec §4-15 改为 `cairn-{project_id}` 并注明 `/ → ->` 替换因 `proj_###` 无 `/` 而失效、前缀偏离无唯一性影响。
 
-## 49. [phase2] P2-9：skeleton §3 open_task_run 参数顺序
+## 49. [resolved] P2-9：skeleton §3 open_task_run 参数顺序  [P2-cleanup 2026-08-06]
 - 服务 `(engagement_id, project_id=None, task_type, worker)` vs 客户端关键字顺序不同，语义一致。文档同步（低优先）。
+- **处理**：skeleton §3 签名补 `status='queued', started_at=None, outcome_note=None`，注释注明「全部 keyword-only，客户端关键字顺序与之语义一致，参数顺序无关」。
 
-## 50. [phase2] P2-10：replay_runs 无 created_at / verify_runs 无 engagement_id
+## 50. [evaluated] P2-10：replay_runs 无 created_at / verify_runs 无 engagement_id  [P2-cleanup 2026-08-06]
 - 报告按 started_at 排序 / stats 经 JOIN。文档或 DDL 加列（报 10，低优先）。
+- **评估**：不改 DDL。给加列建议（影响面/迁移/涉及包）见 phase2-p2-cleanup.md §P2-10——`replay_runs.created_at`（建议，替代 started_at 排序，回填 COALESCE(started_at, finished_at)，涉 10/30/41）；`verify_runs.engagement_id`（可选，免 JOIN，涉 10/22/41）。均 phase 3 可选优化，非缺陷。
 
 ## 51. [phase2] 50 未覆盖项（需后续包或环境）
 - audit 自动抽样派发、replay fixed 自动复测接线、task_events 原始流清理、FTS 同步触发器、mitmproxy 真实集成、executor 侧车、Docker 真实容器验收、前端验收（42 构建中）。

@@ -83,14 +83,14 @@ CREATE INDEX IF NOT EXISTS idx_waiver_item ON waivers(item_id);
 
 -- ── FTS5 检索（可选，覆盖项可按 target/test_type 名检索）───────────
 -- 注意：SQLite 虚拟表无法 FK；由应用层在写表时同步维护索引。
--- content='' 为 contentless 模式：无 UPDATE/DELETE，只能 INSERT OR REPLACE；
+-- 与 DDL §8 / server/db.py 口径一致：非 contentless（无 content=''），常规 FTS5 表，
+-- 建表即可 INSERT/UPDATE/DELETE；FTS 同步触发器未实现（占位表）。
 -- target_value/test_type_name 不在 coverage_items 表内（只有 id），
 -- 应用层须 JOIN targets/test_types 组装后手工写索引（服务端统一在 coverage writer 内维护）。
 CREATE VIRTUAL TABLE IF NOT EXISTS fts_coverage USING fts5(
     item_id UNINDEXED,
     target_value,
-    test_type_name,
-    content=''
+    test_type_name
 );
 ```
 

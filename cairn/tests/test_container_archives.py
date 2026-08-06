@@ -285,6 +285,48 @@ def test_ensure_running_host_network_allowed_only_explicitly(tmp_path):
     assert backend._client.containers.run_calls[0]["network_mode"] == "host"
 
 
+# --------------------------------------------------------------------------- capture 必须 bridge（C12 运行时强制，P2-4）
+
+
+def test_ensure_running_rejects_host_network_when_capture_enabled(tmp_path):
+    """capture_proxy.enabled=true + network_mode=host → 启动拒绝（C12 / dispatch-config-spec §8）。"""
+    cfg = make_config(tmp_path)
+    cfg.container.network_mode = "host"
+    backend = ContainerBackend(
+        cfg,
+        docker_client=FakeDockerClient(),
+        docker_cli=FAKE_DOCKER,
+        workspace_root=str(tmp_path / "workspace"),
+        scope_resolver=lambda pid: SCOPE,  # SCOPE 的 capture_proxy.enabled=True
+    )
+    with pytest.raises(ContainerBackendError):
+        backend.ensure_running("p1")
+    assert backend._client.containers.run_calls == []  # 未创建任何容器
+
+
+def test_ensure_running_host_network_ok_when_capture_disabled(tmp_path):
+    """capture 关闭 + network_mode=host → 正常（host 仅 local/演练且无捕获时允许）。"""
+    cfg = make_config(tmp_path)
+    cfg.container.network_mode = "host"
+    scope_no_capture = {**SCOPE, "capture_proxy": None}
+    backend = ContainerBackend(
+        cfg,
+        docker_client=FakeDockerClient(),
+        docker_cli=FAKE_DOCKER,
+        workspace_root=str(tmp_path / "workspace"),
+        scope_resolver=lambda pid: scope_no_capture,
+    )
+    backend.ensure_running("p1")
+    assert backend._client.containers.run_calls[0]["network_mode"] == "host"
+
+
+def test_ensure_running_bridge_ok_when_capture_enabled(tmp_path):
+    """capture 开启 + network_mode=bridge → 正常（默认合规路径）。"""
+    backend = make_backend(tmp_path, scope_resolver=lambda pid: SCOPE)
+    backend.ensure_running("p1")
+    assert backend._client.containers.run_calls[0]["network_mode"] == "bridge"
+
+
 # --------------------------------------------------------------------------- capture env (C6 / §4.1)
 
 

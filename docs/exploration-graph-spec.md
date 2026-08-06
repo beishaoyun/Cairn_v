@@ -37,7 +37,7 @@
 ### 2.1 特殊节点（project 创建时播种）
 - **`origin` 事实**：根节点，`description='origin'`，bootstrap 保留 intent 的 from 源。
 - **`goal` 事实**：目标陈述（A2），`description='goal'`，**报告用，不参与完成判定**。
-- **禁止**：`goal` 作 intent 的 from 源（400 VALIDATION）；`to_fact_id` 指向 goal（v2 无 `to='goal'` 完成边）。
+- **禁止**：`goal` 作 intent 的 from 源（422 VALIDATION）；`to_fact_id` 指向 goal（v2 无 `to='goal'` 完成边）。
 
 ### 2.2 三原语
 - **Fact 只增不改**：任何已建事实不可更新/删除；重复 description 写回幂等跳过（同内容不重复建节点）。
@@ -46,14 +46,14 @@
 
 ### 2.3 worker 状态机（intent）
 `worker = NULL`（可认领）⇄ `worker = worker名`（已认领，租约中）⇄ 释放（回 NULL）或 conclude（`concluded_at` 置位，终态）。
-- 创建 intent 时 `worker` 只能是 `null` 或 `== creator`（否则 400 VALIDATION）。
+- 创建 intent 时 `worker` 只能是 `null` 或 `== creator`（否则 422 VALIDATION）。
 - `worker` 一旦被认领，**只有持有者**能 heartbeat/release/conclude；他人请求 → 409 LEASE_CONFLICT。
 - 心跳超 `intent_timeout` → 读时清理置回 NULL（重新可认领）；已 conclude 不参与。
 
 ### 2.4 错误码语义（图子域）
 | 码 | HTTP | 含义 |
 |---|---|---|
-| `VALIDATION` | 400 | from 含 goal、worker≠creator、空文本（业务校验） |
+| `VALIDATION` | 422 | from 含 goal、worker≠creator、空文本（业务校验） |
 | `PROJECT_INACTIVE` | 403 | 项目非 active（stopped / engagement 非 active） |
 | `LEASE_CONFLICT` | 409 | 租约被他人持有 / 幂等冲突 |
 | `NOT_FOUND` | 404 | pid/iid/fact 不存在 |
@@ -107,8 +107,8 @@ def list_hints(conn, pid) -> list[Hint]
 
 > **编号说明**：本节 1-28 沿用 v1 §12 的图子域内部编号，**与 `rule-registry.md` 的 A/B/C/D/F/O/TV 编号体系无关**（那是 v2 需求 ID）。代码注释引用本节规则用「graph §4-<N>」；引用 v2 规则用 rule-registry 编号。
 
-1. **`goal` 永远不能作为 Intent 的 from 源**（`validate_goal_not_in_sources`）→ 400 VALIDATION。
-2. **创建 intent 时 `worker` 只能是 `null` 或 `== creator`** → 否则 400 VALIDATION。
+1. **`goal` 永远不能作为 Intent 的 from 源**（`validate_goal_not_in_sources`）→ 422 VALIDATION。
+2. **创建 intent 时 `worker` 只能是 `null` 或 `== creator`** → 否则 422 VALIDATION。
 3. **reason 输出规则（v2 收敛版）**：覆盖未收敛时 reason **必须**出非空 intents **或** `recommend_finalize=true`，二者缺一 → 校验失败任务 failed（等价 v1「open_intents 空必须返回 intent」）。`complete` 字段**已删除**，输出 `complete` 一律拒绝。
 4. **reason 单次最多 `max_intents` 条 intent**；若创建 0 条（全部 403/409/写失败）整个任务判 failed。
 5. **保留 bootstrap intent 三重标识**（`description='bootstrap'` + `creator='dispatcher.bootstrap'` + `from=['origin']`）是 Dispatcher 与前端**共同识别**的硬约定（调度 `_is_bootstrap_intent`/`_get_bootstrap_intent` 取「未认领优先」）。
@@ -121,7 +121,7 @@ def list_hints(conn, pid) -> list[Hint]
 12. **conclude 收尾三重前置**：`driver.supports_conclude()` + 有 session + 项目仍 active（`project_allows_conclude_fallback` 再查一次）；心跳已失或已取消则跳过。
 13. **healthcheck `startup_and_task` 时任务启动前再查一次**；explore/bootstrap 的 conclude 阶段不再查。
 14. **图快照写容器 `/tmp/cairn-prompts/<phase>-<12hex>/graph.yaml`**，prompt 中只给文件引用路径（大图不内联），每次 phase 独立目录。
-15. **容器名 `cairn-dispatch-<project_id 的 / → ->`**；容器内写文件路径必须绝对路径且禁 `..`/`.`（tar 构造时校验，防穿越）。
+15. **容器名 `cairn-{project_id}`**（`dispatcher/runtime/containers.py` 实现；早期约定 `cairn-dispatch-<project_id 的 / → ->` 的 `/ → ->` 替换因 `proj_###` 不含 `/` 而失效，统一采用更短前缀 `cairn-{project_id}`，唯一性无碍）；容器内写文件路径必须绝对路径且禁 `..`/`.`（tar 构造时校验，防穿越）。
 16. **completed 容器（v2 engagement 级）**：`completed_action=stop` 只停止（保现场），`remove` 删除。
 17. **stopped 项目（v2 = paused 语义，B5）**：server 立即清空 open intent worker + reason lease（`freeze_project_leases`）；Dispatcher 视为硬停止——取消本地任务、不再进入 conclude fallback、排队停容器。
 18. **（v2 已删除 reopen）** 复测走 engagement `completed→active(retest=true)`，图内不保留「曾完成」记录。
@@ -151,7 +151,7 @@ def list_hints(conn, pid) -> list[Hint]
 | POST | `/projects/{pid}/reason/claim` | `{worker}` | 204 / 409 LEASE_CONFLICT |
 | POST | `/projects/{pid}/reason/heartbeat` | `{worker}` | 204 / 409 |
 | POST | `/projects/{pid}/reason/release` | `{worker}` | 204 |
-| POST | `/projects/{pid}/intents` | `{description, creator, from_fact_ids, to_fact_id?}` | Intent（校验 400/404） |
+| POST | `/projects/{pid}/intents` | `{description, creator, from_fact_ids, to_fact_id?}` | Intent（校验 422/404） |
 | POST | `/projects/{pid}/intents/{iid}/heartbeat` | `{worker}` | 204 / 403 / 409。**首次心跳即认领**（`worker=NULL` → 置为请求者）；已认领者刷新；他人 409（12 客户端的 `claim_intent` 与 `heartbeat_intent` 都映射此路由） |
 | POST | `/projects/{pid}/intents/{iid}/release` | `{worker}` | 204 / 403 / 409 |
 | POST | `/projects/{pid}/intents/{iid}/conclude` | `{worker, facts[]?, coverage_result?, findings[]?}` | 204（server 端编排三子域写） |
@@ -171,7 +171,7 @@ def list_hints(conn, pid) -> list[Hint]
 ## 7. 验收要点
 
 1. project 创建 → 播种 origin/goal 特殊事实；ID 走 scoped_counters（f001/i001/h001 各自计数，无裸自增）。
-2. create_intent 校验：from 含 goal → 400；worker≠creator → 400；to_fact_id=goal → 400。
+2. create_intent 校验：from 含 goal → 422；worker≠creator → 422；to_fact_id=goal → 422。
 3. 租约仲裁：A 认领后 B 心跳/释放 → 409 LEASE_CONFLICT；B 静默放行后 A 可释放。
 4. conclude：写 facts（只增，重复幂等）+ `concluded_at` + 释放租约；携带 coverage_result/findings 时正确转发（可 stub 21/22）。
 5. `freeze_project_leases`：paused 后全部 open intent worker 清空、reason 租约清空。
