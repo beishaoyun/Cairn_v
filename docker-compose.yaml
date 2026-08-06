@@ -1,0 +1,66 @@
+# Cairn v2 — docker-compose (worker-sandbox-hardening.md §7 structure).
+#
+# Hardening notes:
+#   * P0 (implemented in this package): worker containers are launched non-root with
+#     cap_drop=ALL, no-new-privileges, read-only root, mem/cpu/pids limits, per-project
+#     labels — enforced at runtime by cairn/dispatcher/runtime/containers.py.
+#   * P1 (optional sidecar): `cairn-executor` is the SOLE holder of docker.sock and
+#     exposes a restricted create/exec/attach/logs/stop/remove API. It is NOT built yet
+#     (a future package), so the service below is profile-gated and will not start by
+#     default. Until it exists, the dispatcher does NOT mount docker.sock.
+#   * Local dev container mode WITHOUT the executor: uncomment the docker.sock bind on
+#     the dispatcher service below (dev-only; not recommended for shared hosts).
+#
+# The dispatcher's backend paths (workspace_root / evidence_root / capture_ca_dir) must
+# be the DOCKER-HOST-absolute paths of the bind-mounted dirs below — the worker
+# containers bind-mount from the docker host, not from inside the dispatcher container.
+# (ops-runbook covers the full path-mapping table.)
+
+services:
+  cairn-server:
+    build: .
+    image: cairn-app
+    ports: ["8000:8000"]
+    environment:
+      - CAIRN_API_TOKEN=${CAIRN_API_TOKEN}        # env-injected, never in the repo (C5)
+    volumes:
+      - ./datas/cairn:/root/.local/share/cairn/
+      - ./datas/evidence:/var/cairn/evidence
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request;urllib.request.urlopen('http://127.0.0.1:8000/projects',timeout=5)"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+    restart: unless-stopped
+
+  # ── P1 optional executor sidecar (NOT yet implemented) ──────────────────────
+  # Sole docker.sock holder exposing a restricted container API to the dispatcher.
+  # Start with:  docker compose --profile executor up
+  cairn-executor:
+    image: cairn-executor                          # image not published yet
+    # build: ./executor                            # future package
+    profiles: ["executor"]                         # opt-in; skipped by default
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - ./datas/evidence:/var/cairn/evidence
+      - ./datas/workspace:/var/cairn/workspace     # B2/B6: per-project persistent workspaces
+    restart: unless-stopped
+
+  cairn-dispatcher:
+    build: .
+    image: cairn-app
+    command: ["cairn", "dispatch", "--config", "/cairn/dispatch.yaml"]
+    depends_on:
+      cairn-server: { condition: service_healthy }
+    environment:
+      - CAIRN_API_TOKEN=${CAIRN_API_TOKEN}
+      # When the executor exists, point the backend at it instead of a docker CLI.
+      - CAIRN_EXECUTOR_URL=http://cairn-executor:9000
+    volumes:
+      - ./dispatch.yaml:/cairn/dispatch.yaml
+      - ./datas/workspace:/var/cairn/workspace     # == backend workspace_root
+      - ./datas/evidence:/var/cairn/evidence       # == backend evidence_root
+      - ./datas/capture-ca:/var/cairn/capture-ca   # per-engagement CA (Dispatcher holds)
+      # ── local dev ONLY, container mode without the executor ──
+      # - /var/run/docker.sock:/var/run/docker.sock
+    restart: unless-stopped

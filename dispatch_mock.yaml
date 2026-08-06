@@ -79,11 +79,11 @@ workers:
     verify_eligible: true
     env:
       MOCK_HEALTHCHECK: '{"delay":[0,2],"outcomes":{"ok":0.9,"fail":0.1}}'
-      MOCK_BOOTSTRAP: '{"delay":[5,10],"outcomes":{"complete":0.0,"fact":0.6,"rejected":0.1,"invalid_json":0.1,"invalid_payload":0.1,"command_fail":0.1}}'
-      MOCK_BOOTSTRAP_CONCLUDE: '{"delay":[2,6],"outcomes":{"fact":0.6,"rejected":0.1,"invalid_json":0.1,"invalid_payload":0.1,"command_fail":0.1}}'
-      MOCK_REASON: '{"delay":[2,6],"outcomes":{"complete":0.1,"intent":0.4,"noop":0.1,"rejected":0.1,"invalid_json":0.1,"invalid_payload":0.1,"command_fail":0.1}}'
-      MOCK_EXPLORE_EXECUTE: '{"delay":[5,10],"outcomes":{"fact":0.6,"rejected":0.1,"invalid_json":0.1,"invalid_payload":0.1,"command_fail":0.1}}'
-      MOCK_EXPLORE_CONCLUDE: '{"delay":[2,6],"outcomes":{"fact":0.6,"rejected":0.1,"invalid_json":0.1,"invalid_payload":0.1,"command_fail":0.1}}'
+      MOCK_BOOTSTRAP: '{"delay":[5,10],"outcomes":{"ok":0.8,"rejected":0.1,"invalid_json":0.05,"empty":0.02,"command_fail":0.03}}'
+      MOCK_BOOTSTRAP_CONCLUDE: '{"delay":[2,6],"outcomes":{"ok":0.8,"rejected":0.1,"invalid_json":0.05,"empty":0.02,"command_fail":0.03}}'
+      MOCK_REASON: '{"delay":[2,6],"outcomes":{"intents":0.7,"finalize":0.1,"rejected":0.1,"invalid_json":0.05,"empty":0.02,"command_fail":0.03}}'
+      MOCK_EXPLORE_EXECUTE: '{"delay":[5,10],"outcomes":{"fact":0.8,"rejected":0.1,"invalid_json":0.05,"empty":0.02,"command_fail":0.03}}'
+      MOCK_EXPLORE_CONCLUDE: '{"delay":[2,6],"outcomes":{"fact":0.8,"rejected":0.1,"invalid_json":0.05,"empty":0.02,"command_fail":0.03}}'
       # v2 mock extensions (verify-mock-test-spec §2): coverage-result + verify/replay phases
       MOCK_EXPLORE_COVERAGE_OUTCOME: '{"outcomes":{"no_issue":0.5,"finding_created":0.4,"not_applicable":0.1}}'
       MOCK_VERIFY: '{"delay":[2,6],"outcomes":{"confirmed":0.5,"rejected":0.2,"needs_more_evidence":0.2,"accepted_false":0.1},"payload":{"verified_severity":"high","verified_traffic_ids":["tr-001"],"suggested_action":"none","reason":"mock"}}'
@@ -97,11 +97,11 @@ workers:
     verify_eligible: true
     env:
       MOCK_HEALTHCHECK: '{"delay":[0,2],"outcomes":{"ok":0.9,"fail":0.1}}'
-      MOCK_BOOTSTRAP: '{"delay":[5,10],"outcomes":{"complete":0.0,"fact":0.6,"rejected":0.1,"invalid_json":0.1,"invalid_payload":0.1,"command_fail":0.1}}'
-      MOCK_BOOTSTRAP_CONCLUDE: '{"delay":[2,6],"outcomes":{"fact":0.6,"rejected":0.1,"invalid_json":0.1,"invalid_payload":0.1,"command_fail":0.1}}'
-      MOCK_REASON: '{"delay":[2,6],"outcomes":{"complete":0.1,"intent":0.4,"noop":0.1,"rejected":0.1,"invalid_json":0.1,"invalid_payload":0.1,"command_fail":0.1}}'
-      MOCK_EXPLORE_EXECUTE: '{"delay":[5,10],"outcomes":{"fact":0.6,"rejected":0.1,"invalid_json":0.1,"invalid_payload":0.1,"command_fail":0.1}}'
-      MOCK_EXPLORE_CONCLUDE: '{"delay":[2,6],"outcomes":{"fact":0.6,"rejected":0.1,"invalid_json":0.1,"invalid_payload":0.1,"command_fail":0.1}}'
+      MOCK_BOOTSTRAP: '{"delay":[5,10],"outcomes":{"ok":0.8,"rejected":0.1,"invalid_json":0.05,"empty":0.02,"command_fail":0.03}}'
+      MOCK_BOOTSTRAP_CONCLUDE: '{"delay":[2,6],"outcomes":{"ok":0.8,"rejected":0.1,"invalid_json":0.05,"empty":0.02,"command_fail":0.03}}'
+      MOCK_REASON: '{"delay":[2,6],"outcomes":{"intents":0.7,"finalize":0.1,"rejected":0.1,"invalid_json":0.05,"empty":0.02,"command_fail":0.03}}'
+      MOCK_EXPLORE_EXECUTE: '{"delay":[5,10],"outcomes":{"fact":0.8,"rejected":0.1,"invalid_json":0.05,"empty":0.02,"command_fail":0.03}}'
+      MOCK_EXPLORE_CONCLUDE: '{"delay":[2,6],"outcomes":{"fact":0.8,"rejected":0.1,"invalid_json":0.05,"empty":0.02,"command_fail":0.03}}'
       MOCK_EXPLORE_COVERAGE_OUTCOME: '{"outcomes":{"no_issue":0.5,"finding_created":0.4,"not_applicable":0.1}}'
       MOCK_VERIFY: '{"delay":[2,6],"outcomes":{"confirmed":0.5,"rejected":0.2,"needs_more_evidence":0.2,"accepted_false":0.1},"payload":{"verified_severity":"high","verified_traffic_ids":["tr-001"],"suggested_action":"none","reason":"mock"}}'
       MOCK_REPLAY: '{"delay":[1,3],"outcomes":{"remediated":0.6,"unchanged":0.3,"ambiguous":0.1},"payload":{"matched_original":0}}'

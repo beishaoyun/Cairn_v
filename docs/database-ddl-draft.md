@@ -247,7 +247,8 @@ CREATE TABLE IF NOT EXISTS scoped_counters (
     PRIMARY KEY (project_id, kind)
 );
 
--- A1：engagement 作用域计数器（kind ↔ ID 前缀完整映射见 §4.1）
+-- A1（DEPRECATED 2026-08-06）：engagement 作用域计数器。
+-- ID 前缀现统一走全局 `counters` 表（name=kind）全局自增（见 §4.1）；本表保留仅兼容历史迁移/旧库，新代码不再写入。
 CREATE TABLE IF NOT EXISTS engagement_counters (
     engagement_id TEXT NOT NULL REFERENCES engagements(id) ON DELETE CASCADE,
     kind          TEXT NOT NULL CHECK (kind IN
@@ -263,8 +264,9 @@ CREATE TABLE IF NOT EXISTS engagement_counters (
 
 ### 4.1 ID 前缀 ↔ 计数器 kind 映射表（A4 统一）
 
-> 除注明外，ID 均为 engagement 作用域三位补零自增，经 `engagement_counters` 表（kind 列）唯一授予；
-> `engagements` 用全局 `counters` 表（kind='engagement'）；`task_runs` / `task_events` 由 Dispatcher 侧全局生成——三者均不进 `engagement_counters`。
+> 除注明外，ID 均为 **全局** 三位补零自增，经 `counters` 表（name=kind）唯一授予，**跨 engagement 全局唯一**；
+> `engagements` 走全局 `counters`（name='engagement'，`eng_###`）；`task_runs` / `task_events` 由 Dispatcher 侧全局生成（name='task'/'event'）。
+> （`engagement_counters` 表保留仅兼容历史迁移，**已停用**——ID 不再按 engagement 作用域计数，见 §10 步骤 5。）
 
 | 前缀 | 表 | 计数器 kind | 说明 |
 |---|---|---|---|
@@ -292,7 +294,7 @@ CREATE TABLE IF NOT EXISTS engagement_counters (
 
 ```sql
 CREATE TABLE IF NOT EXISTS findings (
-    id               TEXT PRIMARY KEY,            -- 'fd-001'（engagement_counters.kind='finding' 自增）
+    id               TEXT PRIMARY KEY,            -- 'fd-001'（counters 表 name='finding' 全局自增）
     engagement_id    TEXT NOT NULL REFERENCES engagements(id) ON DELETE CASCADE,
     target_id        TEXT NOT NULL REFERENCES targets(id) ON DELETE CASCADE,   -- 应用层 gate：DELETE /targets/{tid} 前检查引用 findings/coverage，未结算返回 409（human-workflow §2）；勿用 RESTRICT——会与 DELETE engagement 级联顺序冲突
     title            TEXT NOT NULL,
@@ -372,7 +374,7 @@ CREATE INDEX IF NOT EXISTS idx_find_hist_finding ON finding_history(finding_id);
 -- retest_pass 分类型明细账本（F4：不同类型确认才累计，同类型同轮重复不计）
 -- retest_pass = 当前 retest_round 下该 finding 的确认行数；replay/verify/human 各类型每轮最多各计 1 次
 CREATE TABLE IF NOT EXISTS finding_retest_confirmations (
-    id           TEXT PRIMARY KEY,               -- 'rc-001'（engagement 作用域，kind='retest_confirmation'）
+    id           TEXT PRIMARY KEY,               -- 'rc-001'（counters 表 name='retest_confirmation' 全局自增）
     finding_id   TEXT NOT NULL REFERENCES findings(id) ON DELETE CASCADE,
     retest_round INTEGER NOT NULL DEFAULT 0,     -- 与 findings.retest_round 对应
     kind         TEXT NOT NULL CHECK (kind IN ('replay','verify','human')),
@@ -592,7 +594,7 @@ CREATE INDEX IF NOT EXISTS idx_task_events_run ON task_events(task_run_id, seq);
 | 2 | `ALTER TABLE projects ADD COLUMN engagement_id`（先查 `PRAGMA table_info(projects)` 是否存在） |
 | 3 | 兼容历史：`bootstrap_mode → bootstrap_enabled` 迁移（沿用 v1 `_ensure_project_columns` 思路） |
 | 4 | 历史 `settings` 补 `global_kill_switch`、`coverage_policy` 列（或通过重建 settings 单例行迁移） |
-| 5 | 计数器：`counters` 增 `engagement` 行；新建 `engagement_counters`（findings/coverage/evidence 等 kind）；`scoped_counters` 收敛回 project 图专用 kind |
+| 5 | 计数器：`counters` 增 `engagement` 与全部业务 kind 行（findings/coverage/evidence/targets 等，全局自增）；`scoped_counters` 收敛回 project 图专用 kind；`engagement_counters` 保留兼容但停用 |
 | 6 | 空库回填：`INSERT OR IGNORE` settings / counters 初始行 |
 | 7 | 索引与 FTS5 虚拟表在迁移末尾统一 `CREATE INDEX IF NOT EXISTS` / `CREATE VIRTUAL TABLE IF NOT EXISTS` |
 | 8 | 备份：迁移前 `VACUUM INTO 'backup_<ts>.db'` |
